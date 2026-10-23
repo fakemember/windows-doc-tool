@@ -41,6 +41,18 @@ jobs:
         run: |
           choco install innosetup -y --no-progress
 
+      - name: Ensure Inno Setup language files
+        shell: pwsh
+        run: |
+          # choco 的 innosetup 包可能不附带非英文语言文件，缺失时从官方源码仓库补齐
+          $langDir = "C:\Program Files (x86)\Inno Setup 6\Languages"
+          if (-not (Test-Path "$langDir\ChineseSimplified.isl")) {
+              New-Item -ItemType Directory -Force -Path $langDir | Out-Null
+              curl.exe -L -o "$langDir\ChineseSimplified.isl" `
+                  https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl
+              if (-not (Test-Path "$langDir\ChineseSimplified.isl")) { throw "ChineseSimplified.isl download failed" }
+          }
+
       - name: Download 7za standalone
         shell: pwsh
         run: |
