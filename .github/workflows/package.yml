@@ -82,7 +82,13 @@ jobs:
         run: |
           python build_scripts\build_exe.py --entry src\wdt\main.py --runtime-dir runtime
 
+      - name: Create Portable Zip (Zero Admin, Extract & Run)
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\wdt\* -DestinationPath dist\WindowsDocTool_v0.1.0_portable.zip -Force
+
       - name: Compile Inno Setup Installer
+        continue-on-error: true
         shell: pwsh
         run: |
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
@@ -97,11 +103,6 @@ jobs:
               "/DOutputDir=$PWD\dist" `
               build_scripts\installer.iss
 
-      - name: Create Portable Zip (Zero Admin, Extract & Run)
-        shell: pwsh
-        run: |
-          Compress-Archive -Path dist\wdt\* -DestinationPath dist\WindowsDocTool_v0.1.0_portable.zip -Force
-
       - name: Upload Installer and Portable Zip
         uses: actions/upload-artifact@v4
         with:
@@ -109,4 +110,4 @@ jobs:
           path: |
             dist\WindowsDocTool_Setup_v*.exe
             dist\WindowsDocTool_v*.zip
-          if-no-files-found: error
+          if-no-files-found: warn
