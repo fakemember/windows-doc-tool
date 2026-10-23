@@ -136,13 +136,10 @@ def test_smoke_failure_triggers_rollback(tmp_path: Path, monkeypatch):
     create_fake_lo_tree(fake_lo)
     output_dir = tmp_path / "output_runtime"
 
-    # mock run_smoke_test：源运行时冒烟通过，输出运行时冒烟失败
+    # mock run_smoke_test 返回 False 模拟转换崩溃或失败（现仅 output 副本一次冒烟）
     import slim_libreoffice
 
-    smoke_results = iter([True, False])
-    monkeypatch.setattr(
-        slim_libreoffice, "run_smoke_test", lambda *a, **k: next(smoke_results)
-    )
+    monkeypatch.setattr(slim_libreoffice, "run_smoke_test", lambda *a, **k: False)
 
     # 伪造一个可执行的 soffice 文件供探测
     fake_soffice = output_dir / "program" / "soffice.com"

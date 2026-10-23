@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Callable
 
 # 最简 RTF 测试片段（用于冒烟验证）
@@ -241,13 +242,43 @@ def rollback_deletions(source: Path, output: Path, plan: list[Path]) -> None:
             dst_item.mkdir(parents=True, exist_ok=True)
 
 
+def _kill_soffice_under(base_dir: Path) -> None:
+    """终止可执行文件位于 base_dir 之下的 soffice/soffice.bin 进程。
+
+    LO 首次启动的更新器可能在冒烟结束后仍以后台进程存活并占用/锁定目录，
+    必须在复制或回滚前清场。只杀 base_dir 之下的实例，不影响用户其他 LO 会话。
+    """
+    base_str = str(base_dir)
+    if sys.platform == "win32":
+        ps_script = (
+            "Get-CimInstance Win32_Process "
+            "-Filter \"Name='soffice.exe' OR Name='soffice.bin'\" | "
+            f"Where-Object {{ $_.ExecutablePath -like '{base_str}\\*' }} | "
+            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
+            "-ErrorAction SilentlyContinue }"
+        )
+        for _ in range(2):  # 更新器可能复活，杀两轮
+            subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+                check=False,
+                capture_output=True,
+            )
+            time.sleep(1)
+    else:
+        subprocess.run(["pkill", "-f", base_str], check=False, capture_output=True)
+
+
 def execute(
     source: Path,
     output: Path,
     soffice: Path | None = None,
     smoke: bool = True,
 ) -> list[Path]:
-    """复制 source 到 output，按 prune_plan 执行删除，并进行冒烟验证。
+    """复制 source 到 output，按 prune_plan 执行删除，并对 output 副本冒烟验证。
+
+    注意：绝不对 source 原地冒烟——LO 首次启动的更新器会锁住并修改源目录。
+    复制带重试（刚解压的 soffice.exe 可能被杀软扫描占用）；冒烟结束后无论
+    成败都会清理 output 之下残留的 soffice 进程，避免后续打包步骤撞文件锁。
 
     Args:
         source: 源 LibreOffice 便携目录。
@@ -269,21 +300,20 @@ def execute(
 
     plan = prune_plan(source)
 
-    # 0. 源运行时冒烟：先确认本机可以正常运行该 LibreOffice，
-    #    以区分"机器/环境问题"与"裁剪破坏了运行时"两类失败
-    if smoke:
-        src_soffice = find_bundled_soffice(source)
-        if src_soffice is None or not src_soffice.exists():
-            raise RuntimeError(f"源目录中找不到可执行的 soffice 文件: {source / 'program'}")
-        print(f"正在对源运行时执行冒烟验证 ({src_soffice})...")
-        if not run_smoke_test(src_soffice):
-            raise RuntimeError(
-                "源 LibreOffice 冒烟验证失败：本机无法正常运行该运行时，终止裁剪。"
-            )
-
-    # 1. 复制目录树
+    # 1. 复制目录树（带重试：刚解压的 soffice.exe 可能被杀软扫描占用）
     output.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, output, dirs_exist_ok=True)
+    for copy_attempt in range(1, 4):
+        try:
+            shutil.copytree(source, output, dirs_exist_ok=True)
+            break
+        except PermissionError as exc:
+            if copy_attempt == 3:
+                raise
+            print(
+                f"复制被占用 ({exc})，2 秒后重试 ({copy_attempt}/3)...",
+                file=sys.stderr,
+            )
+            time.sleep(2)
     size_before = get_dir_size_bytes(output)
 
     # 2. 逐项删除（按路径深度从深到浅删除）
@@ -300,7 +330,7 @@ def execute(
             except OSError:
                 shutil.rmtree(target, ignore_errors=True)
 
-    # 3. 冒烟验证
+    # 3. 冒烟验证（仅针对 output 副本，绝不对 source 原地冒烟）
     if smoke:
         target_soffice = soffice if soffice is not None else find_bundled_soffice(output)
         if target_soffice is None or not target_soffice.exists():
@@ -317,6 +347,8 @@ def execute(
 
         print(f"正在执行无头转换冒烟验证 ({target_soffice})...")
         smoke_ok = run_smoke_test(target_soffice)
+        # 清理冒烟唤起的后台 LO/更新器进程，防止占用文件导致回滚或后续打包失败
+        _kill_soffice_under(output)
         if not smoke_ok:
             print("警告: 冒烟验证失败，正在回滚本批删除...", file=sys.stderr)
             rollback_deletions(source, output, plan)
