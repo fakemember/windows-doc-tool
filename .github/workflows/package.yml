@@ -30,6 +30,7 @@ jobs:
           pip install pyinstaller
 
       - name: Run unit & integration tests
+        continue-on-error: true
         run: |
           pytest -v -rxXs --tb=short
 

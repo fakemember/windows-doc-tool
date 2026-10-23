@@ -41,6 +41,10 @@ def build_pyinstaller_args(
         str(dist_dir),
         "--workpath",
         str(work_dir),
+        "--collect-all",
+        "wdt",
+        "--collect-all",
+        "PySide6",
     ]
 
     # 如果指定了 runtime 且目录存在，则作为数据目录收集到产物根下的 runtime/
