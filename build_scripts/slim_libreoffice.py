@@ -149,64 +149,70 @@ def find_bundled_soffice(output_dir: Path) -> Path | None:
     return None
 
 
-def run_smoke_test(soffice_path: Path) -> bool:
-    """运行最简 RTF->DOCX 转换冒烟测试。
+def run_smoke_test(soffice_path: Path, attempts: int = 3) -> bool:
+    """运行最简 RTF->DOCX 转换冒烟测试（带重试）。
+
+    Windows 全新环境首次无头启动 LO 时存在初始化竞态：soffice.com 可能
+    退出码 0 但不产出任何文件（CI 知名问题），重试（profile 已预热）即可恢复。
 
     Args:
         soffice_path: soffice 可执行文件路径。
+        attempts: 最大尝试次数，每次使用独立的临时 profile 目录。
 
     Returns:
-        若产物有效则返回 True，否则返回 False。
+        任一尝试产出有效 DOCX 则返回 True，全部失败返回 False。
     """
     if not soffice_path.exists():
         print(f"冒烟测试失败: soffice 可执行文件不存在: {soffice_path}", file=sys.stderr)
         return False
 
-    with tempfile.TemporaryDirectory(prefix="wdt_lo_smoke_") as tmp_str:
-        tmp_dir = Path(tmp_str)
-        rtf_file = tmp_dir / "smoke.rtf"
-        rtf_file.write_bytes(MINIMAL_RTF)
-        out_dir = tmp_dir / "out"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        profile_dir = tmp_dir / "profile"
-        profile_dir.mkdir(parents=True, exist_ok=True)
+    for attempt in range(1, attempts + 1):
+        with tempfile.TemporaryDirectory(prefix="wdt_lo_smoke_") as tmp_str:
+            tmp_dir = Path(tmp_str)
+            rtf_file = tmp_dir / "smoke.rtf"
+            rtf_file.write_bytes(MINIMAL_RTF)
+            out_dir = tmp_dir / "out"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            profile_dir = tmp_dir / "profile"
+            profile_dir.mkdir(parents=True, exist_ok=True)
 
-        profile_url = profile_dir.resolve().as_uri()
-        cmd = [
-            str(soffice_path),
-            "--headless",
-            "--norestore",
-            "--nolockcheck",
-            "--nodefault",
-            "--nologo",
-            "--nofirststartwizard",
-            f"-env:UserInstallation={profile_url}",
-            "--convert-to",
-            "docx",
-            "--outdir",
-            str(out_dir),
-            str(rtf_file),
-        ]
-        try:
-            res = subprocess.run(
-                cmd,
-                capture_output=True,
-                timeout=240,
-                text=True,
-                check=False,
-            )
-            out_docx = out_dir / "smoke.docx"
-            success = out_docx.is_file() and out_docx.stat().st_size > 0
-            if not success:
+            profile_url = profile_dir.resolve().as_uri()
+            cmd = [
+                str(soffice_path),
+                "--headless",
+                "--norestore",
+                "--nolockcheck",
+                "--nodefault",
+                "--nologo",
+                "--nofirststartwizard",
+                f"-env:UserInstallation={profile_url}",
+                "--convert-to",
+                "docx",
+                "--outdir",
+                str(out_dir),
+                str(rtf_file),
+            ]
+            try:
+                res = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    timeout=240,
+                    text=True,
+                    check=False,
+                )
+                out_docx = out_dir / "smoke.docx"
+                if out_docx.is_file() and out_docx.stat().st_size > 0:
+                    if attempt > 1:
+                        print(f"冒烟测试于第 {attempt}/{attempts} 次尝试通过。")
+                    return True
                 print(
-                    f"冒烟测试未生成有效 DOCX (退出码: {res.returncode}):\n"
+                    f"冒烟测试第 {attempt}/{attempts} 次未生成有效 DOCX (退出码: {res.returncode}):\n"
                     f"stdout: {res.stdout}\nstderr: {res.stderr}",
                     file=sys.stderr,
                 )
-            return success
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            print(f"冒烟测试进程执行异常: {exc}", file=sys.stderr)
-            return False
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                print(f"冒烟测试第 {attempt}/{attempts} 次进程执行异常: {exc}", file=sys.stderr)
+    return False
 
 
 def rollback_deletions(source: Path, output: Path, plan: list[Path]) -> None:
@@ -250,6 +256,18 @@ def execute(
         raise FileNotFoundError(f"源目录不存在: {source}")
 
     plan = prune_plan(source)
+
+    # 0. 源运行时冒烟：先确认本机可以正常运行该 LibreOffice，
+    #    以区分"机器/环境问题"与"裁剪破坏了运行时"两类失败
+    if smoke:
+        src_soffice = find_bundled_soffice(source)
+        if src_soffice is None or not src_soffice.exists():
+            raise RuntimeError(f"源目录中找不到可执行的 soffice 文件: {source / 'program'}")
+        print(f"正在对源运行时执行冒烟验证 ({src_soffice})...")
+        if not run_smoke_test(src_soffice):
+            raise RuntimeError(
+                "源 LibreOffice 冒烟验证失败：本机无法正常运行该运行时，终止裁剪。"
+            )
 
     # 1. 复制目录树
     output.mkdir(parents=True, exist_ok=True)
