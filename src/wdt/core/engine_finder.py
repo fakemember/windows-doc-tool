@@ -68,6 +68,34 @@ def _check_dir_candidates(base_dir: Path) -> Path | None:
     return None
 
 
+def find_bundled_dir() -> Path | None:
+    """自动推导内置的便携 LibreOffice 目录（支持打包产物、内部临时目录与当前目录）。"""
+    candidates: list[Path] = []
+    # 1. 检查可执行文件同级目录 (one-dir 打包典型路径)
+    try:
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.append(exe_dir / "runtime" / "libreoffice")
+        candidates.append(exe_dir / "_internal" / "runtime" / "libreoffice")
+    except Exception:
+        pass
+
+    # 2. PyInstaller 运行释放目录 (若存在)
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "runtime" / "libreoffice")
+
+    # 3. 当前工作目录下的 runtime/libreoffice
+    try:
+        candidates.append(Path.cwd() / "runtime" / "libreoffice")
+    except Exception:
+        pass
+
+    for cand in candidates:
+        if cand.is_dir() and _check_dir_candidates(cand):
+            return cand
+    return None
+
+
 def find_engine(
     bundled_dir: Path | None = None,
     extra_paths: Sequence[Path] = (),
@@ -75,12 +103,15 @@ def find_engine(
     """智能探测 LibreOffice 引擎。
 
     探测顺序：
-    1. bundled_dir（便携布局）
+    1. bundled_dir（便携布局，未指定时自动推导）
     2. extra_paths（额外候选路径）
     3. PATH 环境变量
     4. 系统常见安装路径（Linux / Windows / macOS）
     """
     # 1. 检查 bundled_dir
+    if bundled_dir is None:
+        bundled_dir = find_bundled_dir()
+
     if bundled_dir is not None:
         b_path = Path(bundled_dir)
         if _is_executable(b_path):

@@ -166,11 +166,8 @@ class MainWindow(QMainWindow):
         self._apply_global_theme()
 
     def _init_engine(self) -> None:
-        bundled_dir = Path("./runtime/libreoffice")
         try:
-            self.engine = find_engine(
-                bundled_dir=bundled_dir if bundled_dir.is_dir() else None
-            )
+            self.engine = find_engine()
         except EngineNotFoundError:
             self.engine = None
 

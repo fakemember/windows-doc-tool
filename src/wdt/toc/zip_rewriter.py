@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
@@ -14,7 +15,7 @@ from typing import Mapping
 
 
 def _find_seven_zip(custom_path: Path | None = None) -> str | None:
-    """寻找可用的 7za 或 7z 命令路径"""
+    """寻找可用的 7za 或 7z 命令路径（优先检查打包/便携运行时内置组件）"""
     if custom_path is not None:
         if Path(custom_path).is_file():
             return str(custom_path)
@@ -22,7 +23,31 @@ def _find_seven_zip(custom_path: Path | None = None) -> str | None:
         if found:
             return found
 
-    # 优先查找 7za，其次 7z
+    # 1. 优先检查打包运行时内置的 7za.exe / 7za
+    bundled_candidates: list[Path] = []
+    try:
+        exe_dir = Path(sys.executable).resolve().parent
+        bundled_candidates.append(exe_dir / "runtime" / "7za.exe")
+        bundled_candidates.append(exe_dir / "runtime" / "7za")
+        bundled_candidates.append(exe_dir / "_internal" / "runtime" / "7za.exe")
+    except Exception:
+        pass
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        bundled_candidates.append(Path(meipass) / "runtime" / "7za.exe")
+
+    try:
+        bundled_candidates.append(Path.cwd() / "runtime" / "7za.exe")
+        bundled_candidates.append(Path.cwd() / "runtime" / "7za")
+    except Exception:
+        pass
+
+    for cand in bundled_candidates:
+        if cand.is_file():
+            return str(cand.resolve())
+
+    # 2. 查找 PATH 环境变量中的 7za / 7z
     for cmd in ("7za", "7z"):
         found = shutil.which(cmd)
         if found:

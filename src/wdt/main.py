@@ -162,16 +162,52 @@ def build_toc_config(
 
 
 # ---------------------------------------------------------------------------
+# Windows 原生交互与控制台辅助
+# ---------------------------------------------------------------------------
+
+
+def _attach_windows_console() -> bool:
+    """若在 Windows 下通过命令行启动（即使由 windowed 模式构建），附着到父进程控制台以输出日志。"""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        # ATTACH_PARENT_PROCESS = -1 (即 0xFFFFFFFF)
+        if ctypes.windll.kernel32.AttachConsole(-1):
+            if sys.stdout is None or getattr(sys.stdout, "closed", False):
+                sys.stdout = open("CONOUT$", "w", encoding="utf-8")
+            if sys.stderr is None or getattr(sys.stderr, "closed", False):
+                sys.stderr = open("CONOUT$", "w", encoding="utf-8")
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _show_fatal_message(title: str, message: str) -> None:
+    """在无终端窗口环境下（如双击 exe 启动异常），弹出原生消息对话框。"""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(0, str(message), str(title), 0x10)  # 0x10 = MB_ICONERROR
+            return
+        except Exception:
+            pass
+    sys.stderr.write(f"[{title}] {message}\n")
+
+
+# ---------------------------------------------------------------------------
 # 子命令实现
 # ---------------------------------------------------------------------------
 
 
 def cmd_detect(args: argparse.Namespace) -> int:
     """执行 detect 环境诊断命令。"""
-    bundled_dir = Path("./runtime/libreoffice")
     engine: Engine | None = None
     try:
-        engine = find_engine(bundled_dir=bundled_dir if bundled_dir.is_dir() else None)
+        engine = find_engine()
     except EngineNotFoundError:
         pass
 
@@ -251,9 +287,8 @@ def cmd_convert(args: argparse.Namespace) -> int:
         print("警告: --gray 仅在导出 PDF 时有效，当前目标格式为 docx，已忽略此选项。", file=sys.stderr)
 
     # 探测 LibreOffice 引擎
-    bundled_dir = Path("./runtime/libreoffice")
     try:
-        engine = find_engine(bundled_dir=bundled_dir if bundled_dir.is_dir() else None)
+        engine = find_engine()
     except EngineNotFoundError:
         print("错误: 未找到可用的 LibreOffice / soffice 转换引擎！", file=sys.stderr)
         print("安装提示：Linux 执行 'sudo apt install libreoffice-writer-nogui'", file=sys.stderr)
@@ -414,9 +449,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"错误: 目标路径不存在 - {target_path}", file=sys.stderr)
         return 1
 
-    bundled_dir = Path("./runtime/libreoffice")
     try:
-        engine = find_engine(bundled_dir=bundled_dir if bundled_dir.is_dir() else None)
+        engine = find_engine()
     except EngineNotFoundError:
         print("错误: 未找到可用的 LibreOffice / soffice 转换引擎！", file=sys.stderr)
         return 1
@@ -494,13 +528,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0 if len(unique_failed_srcs) == 0 else 1
 
 
-def cmd_gui(args: argparse.Namespace) -> int:
+def cmd_gui(args: argparse.Namespace | None = None) -> int:
     """启动图形界面 (PySide6)。"""
     try:
         from wdt.ui.main_window import launch_gui
     except ImportError as e:
-        print(f"错误: 无法启动 GUI 界面，缺少依赖: {e}", file=sys.stderr)
-        print('请执行: pip install ".[gui]"', file=sys.stderr)
+        msg = f"无法启动图形界面，缺少依赖: {e}\n若为源码运行请执行: pip install \".[gui]\""
+        _show_fatal_message("Windows Doc Tool 启动错误", msg)
+        print(f"错误: {msg}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        msg = f"启动图形界面时发生未知异常: {e}"
+        _show_fatal_message("Windows Doc Tool 启动错误", msg)
+        print(f"错误: {msg}", file=sys.stderr)
         return 1
     return launch_gui()
 
@@ -620,10 +660,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
 
-    parser = build_parser()
+    # Windows 下尝试附着控制台（供命令行终端实时输出）
+    has_console = _attach_windows_console()
+
+    # 桌面用户双击桌面图标、快捷方式或直接双击 wdt.exe 启动时无传入参数，且无控制台
+    # 此时默认直接启动图形界面 (GUI)；若在终端命令行或测试环境中无参数运行，则打印帮助信息
     if not argv:
+        if sys.platform == "win32" and not has_console and "PYTEST_CURRENT_TEST" not in os.environ:
+            try:
+                return cmd_gui()
+            except Exception as e:
+                _show_fatal_message("Windows Doc Tool 启动错误", f"界面初始化异常:\n{e}")
+                return 1
+
+        parser = build_parser()
         parser.print_help()
         return 0
+
+    parser = build_parser()
 
     try:
         args = parser.parse_args(argv)

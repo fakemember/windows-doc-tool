@@ -234,3 +234,17 @@ def test_convert_batch_rtf_to_docx(tmp_path: Path):
     assert (out_dir / "test1.docx").is_file()
     assert (out_dir / "test2.docx").is_file()
 
+
+def test_main_windows_double_click_launches_gui(monkeypatch):
+    """测试 Windows 环境下无控制台双击启动时，无参数调用默认进入 GUI。"""
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr("wdt.main._attach_windows_console", lambda: False)
+    called = []
+    monkeypatch.setattr("wdt.main.cmd_gui", lambda args=None: called.append(True) or 0)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+
+    ret = main([])
+    assert ret == 0
+    assert called == [True]
+
+

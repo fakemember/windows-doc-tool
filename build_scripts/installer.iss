@@ -83,14 +83,14 @@ Source: "{#LicenseDir}\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recur
 
 [Icons]
 ; 开始菜单快捷方式
-Name: "{autoprograms}\{#AppName}\{#AppName}"; Filename: "{app}\{#AppExeName}"
+Name: "{autoprograms}\{#AppName}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Parameters: "gui"
 Name: "{autoprograms}\{#AppName}\{cm:UninstallProgram,{#AppName}}"; Filename: "{uninstallexe}"
 ; 桌面快捷方式（受 Tasks 控制）
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Parameters: "gui"; Tasks: desktopicon
 
 [Run]
 ; 安装完成后可选启动程序
-Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(AppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExeName}"; Parameters: "gui"; Description: "{cm:LaunchProgram,{#StringChange(AppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 ; [UninstallRun]
 ; 本产品完全绿色化运行，不注册全局系统服务与 COM 组件，不写注册表启动项，
