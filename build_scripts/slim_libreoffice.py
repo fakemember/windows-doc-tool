@@ -150,14 +150,16 @@ def find_bundled_soffice(output_dir: Path) -> Path | None:
 
 
 def run_smoke_test(soffice_path: Path, attempts: int = 3) -> bool:
-    """运行最简 RTF->DOCX 转换冒烟测试（带重试）。
+    """运行最简 RTF->DOCX 转换冒烟测试（带重试与共享 profile）。
 
-    Windows 全新环境首次无头启动 LO 时存在初始化竞态：soffice.com 可能
-    退出码 0 但不产出任何文件（CI 知名问题），重试（profile 已预热）即可恢复。
+    Windows 全新环境首次无头启动 LO 时存在初始化竞态：LO 24.8 便携版首次
+    启动会执行 profile 更新并自我重启，原 soffice.com 进程退出码 0 但转换
+    请求被丢弃（CI 知名问题）。对策是所有尝试共享同一个 profile——第一次
+    尝试负责"热身"，后续尝试在已初始化的 profile 上转换即可成功。
 
     Args:
         soffice_path: soffice 可执行文件路径。
-        attempts: 最大尝试次数，每次使用独立的临时 profile 目录。
+        attempts: 最大尝试次数。
 
     Returns:
         任一尝试产出有效 DOCX 则返回 True，全部失败返回 False。
@@ -166,32 +168,37 @@ def run_smoke_test(soffice_path: Path, attempts: int = 3) -> bool:
         print(f"冒烟测试失败: soffice 可执行文件不存在: {soffice_path}", file=sys.stderr)
         return False
 
-    for attempt in range(1, attempts + 1):
-        with tempfile.TemporaryDirectory(prefix="wdt_lo_smoke_") as tmp_str:
-            tmp_dir = Path(tmp_str)
-            rtf_file = tmp_dir / "smoke.rtf"
-            rtf_file.write_bytes(MINIMAL_RTF)
-            out_dir = tmp_dir / "out"
-            out_dir.mkdir(parents=True, exist_ok=True)
-            profile_dir = tmp_dir / "profile"
-            profile_dir.mkdir(parents=True, exist_ok=True)
+    # ignore_cleanup_errors: 异步存活的 soffice.bin 可能仍占用 profile 文件，
+    # 清理失败不应导致整体报错
+    with tempfile.TemporaryDirectory(
+        prefix="wdt_lo_smoke_", ignore_cleanup_errors=True
+    ) as tmp_str:
+        tmp_dir = Path(tmp_str)
+        rtf_file = tmp_dir / "smoke.rtf"
+        rtf_file.write_bytes(MINIMAL_RTF)
+        out_dir = tmp_dir / "out"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        profile_dir = tmp_dir / "profile"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        profile_url = profile_dir.resolve().as_uri()
 
-            profile_url = profile_dir.resolve().as_uri()
-            cmd = [
-                str(soffice_path),
-                "--headless",
-                "--norestore",
-                "--nolockcheck",
-                "--nodefault",
-                "--nologo",
-                "--nofirststartwizard",
-                f"-env:UserInstallation={profile_url}",
-                "--convert-to",
-                "docx",
-                "--outdir",
-                str(out_dir),
-                str(rtf_file),
-            ]
+        cmd = [
+            str(soffice_path),
+            "--headless",
+            "--norestore",
+            "--nolockcheck",
+            "--nodefault",
+            "--nologo",
+            "--nofirststartwizard",
+            f"-env:UserInstallation={profile_url}",
+            "--convert-to",
+            "docx",
+            "--outdir",
+            str(out_dir),
+            str(rtf_file),
+        ]
+
+        for attempt in range(1, attempts + 1):
             try:
                 res = subprocess.run(
                     cmd,
@@ -200,18 +207,23 @@ def run_smoke_test(soffice_path: Path, attempts: int = 3) -> bool:
                     text=True,
                     check=False,
                 )
-                out_docx = out_dir / "smoke.docx"
-                if out_docx.is_file() and out_docx.stat().st_size > 0:
-                    if attempt > 1:
-                        print(f"冒烟测试于第 {attempt}/{attempts} 次尝试通过。")
-                    return True
-                print(
-                    f"冒烟测试第 {attempt}/{attempts} 次未生成有效 DOCX (退出码: {res.returncode}):\n"
-                    f"stdout: {res.stdout}\nstderr: {res.stderr}",
-                    file=sys.stderr,
-                )
-            except (subprocess.TimeoutExpired, OSError) as exc:
+            except subprocess.TimeoutExpired:
+                print(f"冒烟测试第 {attempt}/{attempts} 次超时 (>240s)", file=sys.stderr)
+                continue
+            except OSError as exc:
                 print(f"冒烟测试第 {attempt}/{attempts} 次进程执行异常: {exc}", file=sys.stderr)
+                continue
+
+            out_docx = out_dir / "smoke.docx"
+            if out_docx.is_file() and out_docx.stat().st_size > 0:
+                if attempt > 1:
+                    print(f"冒烟测试于第 {attempt}/{attempts} 次尝试通过。")
+                return True
+            print(
+                f"冒烟测试第 {attempt}/{attempts} 次未生成有效 DOCX (退出码: {res.returncode}):\n"
+                f"stdout: {res.stdout}\nstderr: {res.stderr}",
+                file=sys.stderr,
+            )
     return False
 
 
