@@ -45,6 +45,8 @@ def create_fake_lo_tree(root: Path) -> dict[str, Path]:
         # share/ 其他配置/注册表项（必须保留，不可误删）
         "share_config_cfg": root / "share" / "config" / "soffice.cfg" / "swriter.xml",
         "share_registry_xcd": root / "share" / "registry" / "main.xcd",
+        # updating/ 更新器补丁暂存区（应该被删除）
+        "updating_patch": root / "updating" / "1633.patch",
     }
     for p in files.values():
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -85,6 +87,9 @@ def test_prune_plan_targets_and_preservation(tmp_path: Path):
     assert "share/dict/zh_CN.dat" not in plan_posix
     assert "share/dict/en_US.aff" not in plan_posix
     assert "share/dict/zh_CN.dic" not in plan_posix
+
+    # 6. 命中 updating/ 更新器补丁暂存区
+    assert "updating/1633.patch" in plan_posix
 
 
 def test_cli_dry_run_does_not_modify_filesystem(tmp_path: Path, capsys):

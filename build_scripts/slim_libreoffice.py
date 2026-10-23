@@ -53,7 +53,9 @@ class PruneRule:
     matcher: Callable[[Path], bool]
 
 
-# 显式规则列表：只裁剪 share/ 下安全且占体积的组件
+# 显式规则列表：只裁剪 share/ 下安全且占体积的组件，
+# 以及顶层 updating/（LO 自带更新器的补丁暂存区——保留它会触发首次启动自更新，
+# 导致运行时目录被后台进程修改并锁定文件，必须裁掉）
 PRUNE_RULES: list[PruneRule] = [
     PruneRule(
         name="help",
@@ -86,6 +88,12 @@ PRUNE_RULES: list[PruneRule] = [
         and rel.parts[1] in ("dict", "dictionaries", "wordbook")
         and _is_non_enzh_dict_item(rel),
     ),
+    PruneRule(
+        name="updater_staging",
+        description="更新器补丁暂存区 (updating/**)",
+        pattern="updating/**",
+        matcher=lambda rel: len(rel.parts) >= 1 and rel.parts[0] == "updating",
+    ),
 ]
 
 
@@ -106,11 +114,11 @@ def prune_plan(source: Path) -> list[Path]:
     for item in source.rglob("*"):
         rel = item.relative_to(source)
         parts = rel.parts
-        # 严格安全边界：非 share/ 目录绝对不删（例如 program/、App/ 等）
-        if not parts or parts[0] != "share":
+        # 严格安全边界：除 share/ 与 updating/ 外的顶层目录绝对不删（program/、App/ 等）
+        if not parts or parts[0] not in ("share", "updating"):
             continue
         # share/program 绝对不删
-        if len(parts) >= 2 and parts[1] == "program":
+        if parts[0] == "share" and len(parts) >= 2 and parts[1] == "program":
             continue
 
         for rule in PRUNE_RULES:
