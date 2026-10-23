@@ -63,8 +63,7 @@ SolidCompression=yes
 PrivilegesRequired=lowest
 DisableProgramGroupPage=yes
 ArchitecturesInstallIn64BitMode=x64compatible
-; 中文与英文消息文件
-MessagesFile=compiler:Default.isl,compiler:Languages\ChineseSimplified.isl
+; 语言定义统一由下方 [Languages] 段管理（Inno 规定二者不可并用）
 
 [Languages]
 Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"

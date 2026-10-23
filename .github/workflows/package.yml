@@ -87,9 +87,15 @@ jobs:
         run: |
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) {
-              $iscc = (Get-Command ISCC.exe).Source
+              $iscc = (Get-ChildItem "C:\Program Files*\Inno Setup 6\ISCC.exe" | Select-Object -First 1).FullName
           }
-          & $iscc /DAppVersion=0.1.0 build_scripts\installer.iss
+          Write-Host "Using ISCC: $iscc"
+          & $iscc /DAppVersion=0.1.0 `
+              "/DSourceDir=$PWD\dist\wdt" `
+              "/DRuntimeDir=$PWD\runtime" `
+              "/DLicenseDir=$PWD\licenses" `
+              "/DOutputDir=$PWD\dist" `
+              build_scripts\installer.iss
 
       - name: Create Portable Zip (Zero Admin, Extract & Run)
         shell: pwsh
