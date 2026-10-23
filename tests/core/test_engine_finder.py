@@ -23,7 +23,7 @@ def test_find_real_engine():
     assert engine.version[0] >= 7
 
 
-def test_find_engine_bundled(tmp_path: Path):
+def test_find_engine_bundled(tmp_path: Path, monkeypatch):
     bundled = tmp_path / "runtime" / "libreoffice"
     prog = bundled / "program"
     prog.mkdir(parents=True)
@@ -31,11 +31,16 @@ def test_find_engine_bundled(tmp_path: Path):
     fake_com = prog / "soffice.com"
     fake_exe = prog / "soffice.exe"
 
-    fake_com.write_text("#!/bin/sh\necho 'LibreOffice 25.2.0.1'\n")
-    fake_exe.write_text("#!/bin/sh\necho 'LibreOffice 24.8.0.1'\n")
+    fake_com.write_text("dummy")
+    fake_exe.write_text("dummy")
 
     fake_com.chmod(fake_com.stat().st_mode | stat.S_IEXEC)
     fake_exe.chmod(fake_exe.stat().st_mode | stat.S_IEXEC)
+
+    monkeypatch.setattr(
+        "wdt.core.engine_finder._parse_version",
+        lambda p: (25, 2) if p.name == "soffice.com" else (24, 8),
+    )
 
     # 优先使用 soffice.com
     engine = find_engine(bundled_dir=bundled)
@@ -44,12 +49,14 @@ def test_find_engine_bundled(tmp_path: Path):
     assert engine.version == (25, 2)
 
 
-def test_find_engine_extra_paths(tmp_path: Path):
+def test_find_engine_extra_paths(tmp_path: Path, monkeypatch):
     extra = tmp_path / "custom_lo"
     extra.mkdir()
     fake_soffice = extra / "soffice"
-    fake_soffice.write_text("#!/bin/sh\necho 'LibreOffice 7.6.0.0'\n")
+    fake_soffice.write_text("dummy")
     fake_soffice.chmod(fake_soffice.stat().st_mode | stat.S_IEXEC)
+
+    monkeypatch.setattr("wdt.core.engine_finder._parse_version", lambda p: (7, 6))
 
     engine = find_engine(extra_paths=[fake_soffice])
     assert engine.source == "bundled"
