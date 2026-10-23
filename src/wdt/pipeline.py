@@ -127,10 +127,7 @@ def run_pipeline(
     # 2. 转换引擎准备
     if options.mode in ("convert", "run"):
         if engine is None:
-            bundled_dir = Path("./runtime/libreoffice")
-            engine = find_engine(
-                bundled_dir=bundled_dir if bundled_dir.is_dir() else None
-            )
+            engine = find_engine()
 
     events: list[PipelineEvent] = []
 

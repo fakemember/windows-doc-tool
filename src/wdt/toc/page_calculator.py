@@ -78,7 +78,7 @@ def compute_pages(
     sect_insert_idx = bisect.bisect_right(sect_positions, insert_pos)
 
     for pos in heading_positions:
-        if pos <= insert_pos:
+        if pos < insert_pos:
             # 防御性处理：位于目录插入点之前的异常标题直接赋为第 1 页
             pages.append(1)
             continue

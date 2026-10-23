@@ -119,3 +119,23 @@ def test_page_calculator_with_body_sect_pr():
     # Heading 1 前无 sectPr/br: page = 1
     # Heading 2 前跨越了一个正文内部 sectPr: page = 1 + 1 = 2
     assert pages == [1, 2]
+
+
+def test_page_calculator_offset_heading_at_insert_pos():
+    """BEFORE_FIRST_HEADING 场景：首标题起始位置恰等于 insert_pos，
+    STATIC_OFFSET 模式下首标题页码必须加上 page_offset（回归：曾被 pos <= insert_pos 短路为 1）。"""
+    fake_doc = (
+        b"<w:body>"
+        b"<w:p><w:t>Heading 1</w:t></w:p>"  # pos = 10，即 insert_pos（目录插在它之前）
+        b"<w:p><w:t>Heading 2</w:t></w:p>"  # pos = 30
+        b"<w:p><w:pPr><w:sectPr/></w:pPr><w:t>End</w:t></w:p>"
+        b"<w:sectPr/>"
+        b"</w:body>"
+    )
+    pages_restart = compute_pages(fake_doc, [10, 30], 10, PageMode.STATIC_RESTART)
+    assert pages_restart == [1, 1]
+
+    pages_offset = compute_pages(
+        fake_doc, [10, 30], 10, PageMode.STATIC_OFFSET, page_offset=3
+    )
+    assert pages_offset == [4, 4]

@@ -17,7 +17,7 @@ import zipfile
 
 from wdt.toc.heading_detector import Heading, detect_headings
 from wdt.toc.page_calculator import PageMode, compute_pages
-from wdt.toc.styles_templates import TocStyle, toc_styles_fragment
+from wdt.toc.styles_templates import HYPERLINK_STYLE_ID, TocStyle, toc_styles_fragment
 from wdt.toc.zip_rewriter import rewrite_zip
 
 
@@ -95,7 +95,7 @@ def _build_toc_entry_xml(
         if level == 1:
             title_rpr = (
                 '<w:rPr>'
-                '<w:rStyle w:val="a7"/>'
+                f'<w:rStyle w:val="{HYPERLINK_STYLE_ID}"/>'
                 '<w:rFonts w:ascii="Calibri" w:eastAsia="微软雅黑" w:hAnsi="Calibri"/>'
                 '<w:b/><w:color w:val="1F4E79"/><w:noProof/>'
                 '</w:rPr>'
@@ -103,7 +103,7 @@ def _build_toc_entry_xml(
         else:
             title_rpr = (
                 '<w:rPr>'
-                '<w:rStyle w:val="a7"/>'
+                f'<w:rStyle w:val="{HYPERLINK_STYLE_ID}"/>'
                 '<w:rFonts w:ascii="Calibri" w:eastAsia="微软雅黑" w:hAnsi="Calibri"/>'
                 '<w:color w:val="262626"/><w:noProof/>'
                 '</w:rPr>'
@@ -111,7 +111,7 @@ def _build_toc_entry_xml(
     elif style == TocStyle.REGULATORY_LISTING:
         title_rpr = (
             '<w:rPr>'
-            '<w:rStyle w:val="a7"/>'
+            f'<w:rStyle w:val="{HYPERLINK_STYLE_ID}"/>'
             '<w:rFonts w:ascii="Times New Roman" w:eastAsia="等线" w:hAnsi="Times New Roman"/>'
             '<w:noProof/>'
             '</w:rPr>'
@@ -119,7 +119,7 @@ def _build_toc_entry_xml(
     elif style == TocStyle.CLASSIC_DOT:
         title_rpr = (
             '<w:rPr>'
-            '<w:rStyle w:val="a7"/>'
+            f'<w:rStyle w:val="{HYPERLINK_STYLE_ID}"/>'
             '<w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体" w:hAnsi="Times New Roman"/>'
             '<w:noProof/>'
             '</w:rPr>'
@@ -127,7 +127,7 @@ def _build_toc_entry_xml(
     else:  # MINIMAL_CLEAN
         title_rpr = (
             '<w:rPr>'
-            '<w:rStyle w:val="a7"/>'
+            f'<w:rStyle w:val="{HYPERLINK_STYLE_ID}"/>'
             '<w:rFonts w:ascii="Arial" w:eastAsia="微软雅黑" w:hAnsi="Arial"/>'
             '<w:color w:val="333333"/><w:noProof/>'
             '</w:rPr>'
@@ -435,9 +435,11 @@ def inject_toc(
     chunks.append(doc_bytes[curr_pos:])
     new_doc_bytes = b"".join(chunks)
 
-    # 10. 处理 styles.xml 注入
-    if 'w:styleId="TOC1"' not in styles_xml:
-        style_frag = toc_styles_fragment(config.style, safe_depth)
+    # 10. 处理 styles.xml 注入（按样式 ID 逐个补缺，不重复注入已有样式）
+    style_frag = toc_styles_fragment(
+        config.style, safe_depth, existing_styles_xml=styles_xml
+    )
+    if style_frag:
         new_styles_xml = styles_xml.replace("</w:styles>", style_frag + "</w:styles>")
     else:
         new_styles_xml = styles_xml

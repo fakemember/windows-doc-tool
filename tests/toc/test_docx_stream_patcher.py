@@ -19,7 +19,7 @@ from wdt.toc.docx_stream_patcher import (
     inject_toc,
 )
 from wdt.toc.page_calculator import PageMode
-from wdt.toc.styles_templates import TocStyle
+from wdt.toc.styles_templates import HYPERLINK_STYLE_ID, TocStyle
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 NS = {"w": W_NS}
@@ -78,16 +78,52 @@ def test_all_styles_injection_and_well_formed(tmp_path: Path, style: TocStyle):
     doc_root = ET.fromstring(doc_str)
     styles_root = ET.fromstring(styles_str)
 
-    # styles.xml 中注入了 TOC1, TOC2, TOC, a7
+    # styles.xml 中注入了 TOC1, TOC2, TOC, Hyperlink
     style_ids = [s.attrib.get(f"{{{W_NS}}}styleId") for s in styles_root.findall("w:style", NS)]
     assert "TOC" in style_ids
     assert "TOC1" in style_ids
     assert "TOC2" in style_ids
-    assert "a7" in style_ids
+    assert HYPERLINK_STYLE_ID in style_ids
 
     # document.xml 中包含超链接以及书签
     hyperlinks = doc_root.findall(".//w:hyperlink", NS)
     assert len(hyperlinks) == 3
+
+
+def test_partial_styles_injection_skips_existing(tmp_path: Path):
+    """原文档已有 TOC1 且占用 a7 样式 ID 时：不重复注入 TOC1、不与 a7 撞 ID，
+    仍补齐缺失的 TOC2 与 Hyperlink 样式（回归：旧逻辑见 TOC1 即整体跳过注入）。"""
+    existing_styles = (
+        '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr></w:style>'
+        '<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr></w:style>'
+        '<w:style w:type="paragraph" w:styleId="TOC1"><w:name w:val="toc 1"/></w:style>'
+        '<w:style w:type="character" w:styleId="a7"><w:name w:val="a7"/></w:style>'
+        "</w:styles>"
+    )
+    docx_file = tmp_path / "partial_styles.docx"
+    build_docx(
+        docx_file,
+        [
+            {"text": "第一章 引言", "pstyle": "Heading1"},
+            {"text": "1.1 背景", "pstyle": "Heading2"},
+        ],
+        styles_xml=existing_styles,
+    )
+
+    config = TocConfig(depth=2, position=Position.DOCUMENT_START)
+    report = inject_toc(docx_file, config)
+    assert report.entries == 2
+
+    _, styles_str, _ = _read_docx_xmls(docx_file)
+    styles_root = ET.fromstring(styles_str)  # well-formed 校验
+    style_ids = [
+        s.attrib.get(f"{{{W_NS}}}styleId") for s in styles_root.findall("w:style", NS)
+    ]
+    assert style_ids.count("TOC1") == 1
+    assert style_ids.count("a7") == 1  # Word 原样式未被覆盖或重复
+    assert "TOC2" in style_ids
+    assert HYPERLINK_STYLE_ID in style_ids
 
 
 def test_bookmark_collision_avoidance(tmp_path: Path):

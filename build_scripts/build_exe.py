@@ -4,14 +4,15 @@
 注意：
 - 严格禁止 one-file 单文件打包模式：内置便携运行时体积约 100MB+，
   单文件模式每次冷启动都会解压到系统 Temp 目录，耗时不可接受。
-- 本脚本采用 one-dir 模式，将主程序及可选的 runtime/ 打包为绿色文件夹。
+- 本脚本采用 one-dir 模式，仅打包主程序；便携运行时 (runtime/) 与
+  许可证 (licenses/) 由 installer.iss / CI 在产物组装阶段单独拷贝，
+  避免重复打包导致安装包体积翻倍。
 - 支持在 Linux 开发机上通过 --dry-run 预览将要执行的完整构建命令。
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -20,7 +21,6 @@ import sys
 
 def build_pyinstaller_args(
     entry: Path,
-    runtime_dir: Path | None = None,
     dist_dir: Path | None = None,
     work_dir: Path | None = None,
     name: str = "wdt",
@@ -47,27 +47,12 @@ def build_pyinstaller_args(
         "PySide6",
     ]
 
-    # 如果指定了 runtime 且目录存在，则作为数据目录收集到产物根下的 runtime/
-    if runtime_dir is not None:
-        runtime_path = Path(runtime_dir)
-        if runtime_path.exists() and runtime_path.is_dir():
-            # Windows 分隔符为 ';'，POSIX 系统为 ':'
-            sep = os.pathsep
-            args.extend(["--add-data", f"{runtime_path.resolve()}{sep}runtime"])
-        else:
-            print(
-                f"警告: 运行时目录 '{runtime_path}' 不存在，跳过收集 runtime。"
-                " (源码阶段开发期允许)",
-                file=sys.stderr,
-            )
-
     args.append(str(entry.resolve() if entry.exists() else entry))
     return args
 
 
 def build_exe(
     entry: Path,
-    runtime_dir: Path | None = None,
     dist_dir: Path | None = None,
     work_dir: Path | None = None,
     name: str = "wdt",
@@ -77,7 +62,6 @@ def build_exe(
 
     Args:
         entry: 程序入口文件路径 (默认 src/wdt/main.py)
-        runtime_dir: 便携运行时目录 (若存在则自动打包入 runtime/)
         dist_dir: 产物输出目录 (默认 dist/)
         work_dir: 编译中间缓存目录 (默认 build/)
         name: 生成的可执行文件名 (默认 wdt)
@@ -88,7 +72,6 @@ def build_exe(
     """
     args = build_pyinstaller_args(
         entry=entry,
-        runtime_dir=runtime_dir,
         dist_dir=dist_dir,
         work_dir=work_dir,
         name=name,
@@ -136,12 +119,6 @@ def main(argv: list[str] | None = None) -> int:
         help="程序入口源码文件路径 (默认: src/wdt/main.py)",
     )
     parser.add_argument(
-        "--runtime-dir",
-        type=Path,
-        default=project_root / "runtime",
-        help="便携运行时组件目录 (默认: runtime/)",
-    )
-    parser.add_argument(
         "--distpath",
         type=Path,
         default=project_root / "dist",
@@ -168,7 +145,6 @@ def main(argv: list[str] | None = None) -> int:
 
     return build_exe(
         entry=args.entry,
-        runtime_dir=args.runtime_dir,
         dist_dir=args.distpath,
         work_dir=args.workpath,
         name=args.name,

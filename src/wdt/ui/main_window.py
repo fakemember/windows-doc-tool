@@ -703,7 +703,15 @@ class MainWindow(QMainWindow):
             if item_el:
                 item_el.setText("-")
 
-        self.progress_bar.setRange(0, len(self.files_list))
+        # 进度条总步数 = 文件数 × 单文件事件数（convert 每目标 1 个，run 为 转换+目录(+PDF) 最多 3 个）
+        events_per_file = 1
+        if options.mode == "convert":
+            events_per_file = (1 if options.make_docx else 0) + (
+                1 if options.make_pdf else 0
+            )
+        elif options.mode == "run":
+            events_per_file = 3 if options.make_pdf else 2
+        self.progress_bar.setRange(0, len(self.files_list) * events_per_file)
         self.progress_bar.setValue(0)
         self.status_bar.showMessage(f"流水线运行中... 待处理: {len(self.files_list)} 个")
 

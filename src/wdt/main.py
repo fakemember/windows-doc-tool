@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import multiprocessing
 import os
 import re
 import sys
@@ -657,6 +658,10 @@ def build_parser() -> WdtArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI 主入口函数，返回整型退出码。"""
+    # PyInstaller 冻结环境下 Windows 以 spawn 启动多进程子进程，
+    # 必须最先调用 freeze_support()，否则 worker 会重新执行本入口导致进程风暴
+    multiprocessing.freeze_support()
+
     if argv is None:
         argv = sys.argv[1:]
 

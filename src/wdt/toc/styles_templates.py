@@ -7,6 +7,11 @@ from __future__ import annotations
 from enum import Enum
 
 
+# Hyperlink 字符样式 ID：刻意避开 Word 自动分配的 a0~a9 短 ID，
+# 防止与原文档已有样式撞 ID 导致 Word 报“XML 非法/内容有问题”错误
+HYPERLINK_STYLE_ID = "WDTocHyperlink"
+
+
 class TocStyle(Enum):
     CLASSIC_DOT = "classic"          # 传统点导线样式（宋体/Times，五号字）
     MODERN_ACCENT = "modern"         # 现代商务（微软雅黑/Calibri，一级标题加粗 #1F4E79）
@@ -102,7 +107,7 @@ def _toc_level_style(style: TocStyle, level: int) -> str:
 def _hyperlink_style() -> str:
     """生成 Hyperlink 字符样式"""
     return (
-        '<w:style w:type="character" w:styleId="a7">'
+        f'<w:style w:type="character" w:styleId="{HYPERLINK_STYLE_ID}">'
         '<w:name w:val="Hyperlink"/>'
         '<w:uiPriority w:val="99"/>'
         '<w:unhideWhenUsed/>'
@@ -114,19 +119,27 @@ def _hyperlink_style() -> str:
     )
 
 
-def toc_styles_fragment(style: TocStyle, depth: int) -> str:
-    """生成可注入 styles.xml 的 XML 片段字符串。
+def toc_styles_fragment(
+    style: TocStyle, depth: int, existing_styles_xml: str = ""
+) -> str:
+    """生成可注入 styles.xml 的 XML 片段字符串，仅包含原文档缺失的样式。
 
-    包含：
+    按样式 ID 逐个比对，已存在的样式不重复注入：
     1. TOC Heading 段落样式 (styleId="TOC")
     2. TOC1..TOC{depth} 段落样式
-    3. Hyperlink 字符样式 (styleId="a7")
+    3. Hyperlink 字符样式 (styleId=HYPERLINK_STYLE_ID)
     """
     safe_depth = max(1, min(depth, 9))
-    parts: list[str] = [_toc_heading_style(style)]
+    parts: list[str] = []
+
+    if 'w:styleId="TOC"' not in existing_styles_xml:
+        parts.append(_toc_heading_style(style))
 
     for level in range(1, safe_depth + 1):
-        parts.append(_toc_level_style(style, level))
+        if f'w:styleId="TOC{level}"' not in existing_styles_xml:
+            parts.append(_toc_level_style(style, level))
 
-    parts.append(_hyperlink_style())
+    if f'w:styleId="{HYPERLINK_STYLE_ID}"' not in existing_styles_xml:
+        parts.append(_hyperlink_style())
+
     return "".join(parts)

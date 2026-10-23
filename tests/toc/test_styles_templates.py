@@ -6,7 +6,7 @@ tests/toc/test_styles_templates.py
 import xml.etree.ElementTree as ET
 import pytest
 
-from wdt.toc.styles_templates import TocStyle, toc_styles_fragment
+from wdt.toc.styles_templates import HYPERLINK_STYLE_ID, TocStyle, toc_styles_fragment
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 NS = {"w": W_NS}
@@ -28,9 +28,27 @@ def test_styles_fragment_well_formed(style: TocStyle, depth: int):
 
     style_ids = [s.attrib.get(f"{{{W_NS}}}styleId") for s in style_elements]
     assert "TOC" in style_ids
-    assert "a7" in style_ids
+    assert HYPERLINK_STYLE_ID in style_ids
     for i in range(1, depth + 1):
         assert f"TOC{i}" in style_ids
+
+
+def test_fragment_skips_existing_styles():
+    """原文档已有的样式不重复注入，仅补齐缺失项"""
+    existing = (
+        '<w:style w:type="paragraph" w:styleId="TOC1"/>'
+        '<w:style w:type="character" w:styleId="a7"/>'
+    )
+    fragment = toc_styles_fragment(TocStyle.CLASSIC_DOT, 3, existing_styles_xml=existing)
+    root = ET.fromstring(f'<w:styles xmlns:w="{W_NS}">{fragment}</w:styles>')
+    style_ids = [s.attrib.get(f"{{{W_NS}}}styleId") for s in root.findall("w:style", NS)]
+
+    assert "TOC1" not in style_ids  # 已存在，不重复
+    assert "a7" not in style_ids  # 与 Word 自动分配的短 ID 撞名风险由独立 ID 规避
+    assert "TOC" in style_ids
+    assert "TOC2" in style_ids
+    assert "TOC3" in style_ids
+    assert HYPERLINK_STYLE_ID in style_ids
 
 
 def test_indentation_progression():

@@ -101,10 +101,10 @@ pip install pyinstaller
 
 2. **补充开源许可证文件（合规必需）**：
    参考 `licenses\README.txt` 中的指引，下载以下官方协议纯文本并放入 `licenses\` 目录：
-   - `licenses\LICENSE.LibreOffice.MPL2.txt`（[MPL-2.0](https://www.mozilla.org/en-US/MPL/2.0/)）
-   - `licenses\LICENSE.PySide6.LGPL3.txt`（[LGPL-3.0](https://www.gnu.org/licenses/lgpl-3.0.html)）
-   - `licenses\LICENSE.7Zip.LGPL21.txt`（[7-Zip License](https://www.7-zip.org/license.txt)）
-   - `licenses\LICENSE.pypdf.BSD3.txt`（[BSD-3-Clause](https://raw.githubusercontent.com/py-pdf/pypdf/main/LICENSE)）
+   - `licenses\LICENSE-LibreOffice-MPL-2.0.txt`（[MPL-2.0](https://www.mozilla.org/en-US/MPL/2.0/)）
+   - `licenses\LICENSE-PySide6-LGPL-3.0.txt`（[LGPL-3.0](https://www.gnu.org/licenses/lgpl-3.0.html)）
+   - `licenses\LICENSE-7Zip-LGPL-2.1.txt`（[7-Zip License](https://www.7-zip.org/license.txt)）
+   - `licenses\LICENSE-pypdf-BSD-3.txt`（[BSD-3-Clause](https://raw.githubusercontent.com/py-pdf/pypdf/main/LICENSE)）
 
 ---
 
@@ -112,19 +112,19 @@ pip install pyinstaller
 
 运行自动化打包脚本：
 ```powershell
-python build_scripts\build_exe.py --entry src\wdt\main.py --runtime-dir runtime
+python build_scripts\build_exe.py --entry src\wdt\main.py
 ```
 
 > **注意**：
 > 本项目**严格禁止**使用 `--onefile` 单文件模式！因为内置便携运行时上百兆，单文件模式每次冷启动都会将所有组件解压至系统的 `%TEMP%` 目录，不仅每次启动卡顿数秒，而且频繁占用大量磁盘 I/O。
 > 采用 `--onedir` 模式可实现秒级启动与即时响应。
+> 构建脚本仅打包主程序；`runtime\` 与 `licenses\` 由 installer.iss 在安装包组装阶段拷贝，
+> 切勿通过 `--add-data` 把 runtime 重复打入 `dist\wdt\_internal\`，否则安装后 LibreOffice 将存在两份副本。
 
 构建完成后，检查 `dist\wdt\` 目录：
 ```powershell
-# 验证主程序与内置运行时已收集完毕
+# 验证主程序已收集完毕
 Test-Path dist\wdt\wdt.exe
-Test-Path dist\wdt\runtime\libreoffice\program\soffice.exe
-```
 
 此时可直接双击运行 `dist\wdt\wdt.exe` 验证图形界面是否秒开。
 

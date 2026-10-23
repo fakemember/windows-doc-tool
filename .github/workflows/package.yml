@@ -34,7 +34,6 @@ jobs:
           pip install pyinstaller
 
       - name: Run unit & integration tests
-        continue-on-error: true
         run: |
           pytest -v -rxXs --tb=short
 
@@ -73,22 +72,21 @@ jobs:
         shell: pwsh
         run: |
           # 下载开源协议文本
-          curl.exe -L -o licenses\LICENSE.LibreOffice.MPL2.txt https://www.mozilla.org/media/MPL/2.0/index.txt
-          curl.exe -L -o licenses\LICENSE.PySide6.LGPL3.txt https://www.gnu.org/licenses/lgpl-3.0.txt
-          curl.exe -L -o licenses\LICENSE.7Zip.LGPL21.txt https://www.7-zip.org/license.txt
-          curl.exe -L -o licenses\LICENSE.pypdf.BSD3.txt https://raw.githubusercontent.com/py-pdf/pypdf/main/LICENSE
+          curl.exe -L -o licenses\LICENSE-LibreOffice-MPL-2.0.txt https://www.mozilla.org/media/MPL/2.0/index.txt
+          curl.exe -L -o licenses\LICENSE-PySide6-LGPL-3.0.txt https://www.gnu.org/licenses/lgpl-3.0.txt
+          curl.exe -L -o licenses\LICENSE-7Zip-LGPL-2.1.txt https://www.7-zip.org/license.txt
+          curl.exe -L -o licenses\LICENSE-pypdf-BSD-3.txt https://raw.githubusercontent.com/py-pdf/pypdf/main/LICENSE
 
       - name: Build PyInstaller One-Dir Package
         run: |
-          python build_scripts\build_exe.py --entry src\wdt\main.py --runtime-dir runtime
+          python build_scripts\build_exe.py --entry src\wdt\main.py
 
       - name: Create Portable Zip (Zero Admin, Extract & Run)
         shell: pwsh
         run: |
-          Compress-Archive -Path dist\wdt\* -DestinationPath dist\WindowsDocTool_v0.1.0_portable.zip -Force
+          Compress-Archive -Path dist\wdt\*, runtime, licenses -DestinationPath dist\WindowsDocTool_v0.1.0_portable.zip -Force
 
       - name: Compile Inno Setup Installer
-        continue-on-error: true
         shell: pwsh
         run: |
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
@@ -110,4 +108,4 @@ jobs:
           path: |
             dist\WindowsDocTool_Setup_v*.exe
             dist\WindowsDocTool_v*.zip
-          if-no-files-found: warn
+          if-no-files-found: error
