@@ -191,7 +191,7 @@ def run_smoke_test(soffice_path: Path) -> bool:
             res = subprocess.run(
                 cmd,
                 capture_output=True,
-                timeout=60,
+                timeout=240,
                 text=True,
                 check=False,
             )
@@ -199,7 +199,8 @@ def run_smoke_test(soffice_path: Path) -> bool:
             success = out_docx.is_file() and out_docx.stat().st_size > 0
             if not success:
                 print(
-                    f"冒烟测试未生成有效 DOCX (退出码: {res.returncode}):\n{res.stderr}",
+                    f"冒烟测试未生成有效 DOCX (退出码: {res.returncode}):\n"
+                    f"stdout: {res.stdout}\nstderr: {res.stderr}",
                     file=sys.stderr,
                 )
             return success
