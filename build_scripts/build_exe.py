@@ -43,9 +43,10 @@ def build_pyinstaller_args(
         str(work_dir),
         "--collect-all",
         "wdt",
-        "--collect-all",
-        "PySide6",
     ]
+    # 注意：不要对 PySide6 使用 --collect-all，否则会把整个 Qt6 运行时
+    # （qml/plugins/translations/webengine，600MB+）全部打入产物。
+    # PyInstaller 内置的 PySide6 hooks 会按实际导入自动收集所需模块与插件。
 
     args.append(str(entry.resolve() if entry.exists() else entry))
     return args

@@ -96,6 +96,16 @@ jobs:
       - name: Create Portable Zip (Zero Admin, Extract & Run)
         shell: pwsh
         run: |
+          # 打印产物构成，便于核对体积来源
+          Write-Host "=== dist\wdt 顶层体积 ==="
+          Get-ChildItem dist\wdt | ForEach-Object {
+              $size = if ($_.PSIsContainer) {
+                  (Get-ChildItem $_.FullName -Recurse -File | Measure-Object Length -Sum).Sum
+              } else { $_.Length }
+              "{0,10:N1} MB  {1}" -f ($size / 1MB), $_.Name
+          } | Sort-Object
+          Write-Host "=== runtime 体积 ==="
+          "{0,10:N1} MB" -f ((Get-ChildItem runtime -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
           Compress-Archive -Path dist\wdt\*, runtime, licenses -DestinationPath dist\WindowsDocTool_v0.1.0_portable.zip -Force
 
       - name: Compile Inno Setup Installer
