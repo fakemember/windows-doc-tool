@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wdt"
+version = "0.1.0"
+description = "Windows batch document converter with styled TOC injection (bundled LibreOffice runtime, no COM)"
+requires-python = ">=3.10"
+dependencies = ["pypdf>=4.0"]
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.6"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+wdt = "wdt.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

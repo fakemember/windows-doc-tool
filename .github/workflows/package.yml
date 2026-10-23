@@ -1,0 +1,101 @@
+name: Build Windows Installer
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Windows Standalone Installer
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[gui,dev]"
+          pip install pyinstaller
+
+      - name: Run unit & integration tests
+        run: |
+          pytest -v
+
+      - name: Install Inno Setup
+        run: |
+          choco install innosetup -y --no-progress
+
+      - name: Download 7za standalone
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path runtime
+          curl.exe -L -o 7za920.zip https://www.7-zip.org/a/7za920.zip
+          tar.exe -xf 7za920.zip -C runtime 7za.exe
+          if (-not (Test-Path runtime\7za.exe)) { throw "7za.exe missing" }
+
+      - name: Download and Slim LibreOffice Portable
+        shell: pwsh
+        run: |
+          # 下载官方 LibreOffice Portable
+          $loUrl = "https://download.documentfoundation.org/libreoffice/portable/24.8.7/LibreOfficePortablePrevious_24.8.7_MultilingualStandard.paf.exe"
+          Write-Host "Downloading LibreOffice Portable from $loUrl..."
+          curl.exe -L -o LO_Portable.paf.exe $loUrl
+
+          Write-Host "Extracting LibreOffice Portable..."
+          7z.exe x LO_Portable.paf.exe -o"C:\temp\LO_Extract" -y | Out-Null
+
+          $loSource = "C:\temp\LO_Extract\App\libreoffice"
+          if (-not (Test-Path "$loSource\program\soffice.exe")) {
+              throw "soffice.exe not found under $loSource"
+          }
+
+          Write-Host "Running slim_libreoffice.py..."
+          python build_scripts\slim_libreoffice.py --source "$loSource" --output "runtime\libreoffice"
+
+      - name: Prepare Licenses
+        shell: pwsh
+        run: |
+          # 下载开源协议文本
+          curl.exe -L -o licenses\LICENSE.LibreOffice.MPL2.txt https://www.mozilla.org/media/MPL/2.0/index.txt
+          curl.exe -L -o licenses\LICENSE.PySide6.LGPL3.txt https://www.gnu.org/licenses/lgpl-3.0.txt
+          curl.exe -L -o licenses\LICENSE.7Zip.LGPL21.txt https://www.7-zip.org/license.txt
+          curl.exe -L -o licenses\LICENSE.pypdf.BSD3.txt https://raw.githubusercontent.com/py-pdf/pypdf/main/LICENSE
+
+      - name: Build PyInstaller One-Dir Package
+        run: |
+          python build_scripts\build_exe.py --entry src\wdt\main.py --runtime-dir runtime
+
+      - name: Compile Inno Setup Installer
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+              $iscc = (Get-Command ISCC.exe).Source
+          }
+          & $iscc /DAppVersion=0.1.0 build_scripts\installer.iss
+
+      - name: Create Portable Zip (Zero Admin, Extract & Run)
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\wdt\* -DestinationPath dist\WindowsDocTool_v0.1.0_portable.zip -Force
+
+      - name: Upload Installer and Portable Zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: WindowsDocTool_Release
+          path: |
+            dist\WindowsDocTool_Setup_v*.exe
+            dist\WindowsDocTool_v*.zip
+          if-no-files-found: error
