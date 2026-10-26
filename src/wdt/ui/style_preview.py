@@ -38,10 +38,10 @@ def draw_style_preview(style: TocStyle, width: int = 160, height: int = 100) -> 
         has_accent_bar = False
     elif style == TocStyle.MODERN_ACCENT:
         title_text = "Contents"
-        accent_color = QColor("#0284C7")  # 现代天蓝
-        text_color = QColor("#1E293B")
+        accent_color = QColor("#2563EB")  # 现代科技蓝
+        text_color = QColor("#1F2937")
         dot_style = "sparse"
-        page_color = QColor("#0284C7")
+        page_color = QColor("#2563EB")
         has_accent_bar = True
     elif style == TocStyle.REGULATORY_LISTING:
         title_text = "Table of Contents"
@@ -59,7 +59,7 @@ def draw_style_preview(style: TocStyle, width: int = 160, height: int = 100) -> 
         has_accent_bar = False
 
     # 2. 绘制标题
-    title_font = QFont("sans-serif", 8, QFont.Weight.Bold)
+    title_font = QFont("sans-serif", 7, QFont.Weight.Bold)
     painter.setFont(title_font)
     painter.setPen(accent_color)
     painter.drawText(QRectF(10, 8, width - 20, 16), Qt.AlignmentFlag.AlignLeft, title_text)
@@ -131,18 +131,18 @@ class StyleCardWidget(QFrame):
         self.setObjectName("styleCard")
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(4)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(3)
 
         # 缩略图
         self.preview_label = QLabel(self)
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_label.setPixmap(draw_style_preview(style, width=140, height=85))
+        self.preview_label.setPixmap(draw_style_preview(style, width=112, height=70))
         layout.addWidget(self.preview_label)
 
         # 单选按钮
         self.radio = QRadioButton(title, self)
-        self.radio.setStyleSheet("font-weight: bold; font-size: 11px;")
+        self.radio.setStyleSheet("font-weight: 600; font-size: 11px; background: transparent;")
         layout.addWidget(self.radio, alignment=Qt.AlignmentFlag.AlignCenter)
 
         self._update_style(False)
@@ -167,9 +167,9 @@ class StyleCardWidget(QFrame):
             self.setStyleSheet(
                 """
                 QFrame#styleCard {
-                    border: 2px solid #0284C7;
-                    border-radius: 6px;
-                    background-color: #F0F9FF;
+                    border: 2px solid #2563EB;
+                    border-radius: 8px;
+                    background-color: #EFF6FF;
                 }
                 """
             )
@@ -177,13 +177,13 @@ class StyleCardWidget(QFrame):
             self.setStyleSheet(
                 """
                 QFrame#styleCard {
-                    border: 1px solid #E2E8F0;
-                    border-radius: 6px;
+                    border: 1px solid #E5E7EB;
+                    border-radius: 8px;
                     background-color: #FFFFFF;
                 }
                 QFrame#styleCard:hover {
-                    border: 1px solid #94A3B8;
-                    background-color: #F8FAFC;
+                    border: 1px solid #9CA3AF;
+                    background-color: #F9FAFB;
                 }
                 """
             )

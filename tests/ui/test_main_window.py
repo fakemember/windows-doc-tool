@@ -197,7 +197,7 @@ def test_dynamic_pdf_conflict_dialog_interception(tmp_path: Path, main_window, m
     def mock_critical(parent, title, text):
         nonlocal alert_called
         alert_called = True
-        assert "不能与「动态域代码 (dynamic)」目录同时使用" in text
+        assert "「Word 动态域」页码模式不能与 PDF 导出同时使用" in text
 
     monkeypatch.setattr(QMessageBox, "critical", mock_critical)
     main_window.on_start_pipeline()
