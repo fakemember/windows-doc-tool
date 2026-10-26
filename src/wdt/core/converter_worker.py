@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Literal, Mapping, Sequence
 
 from wdt.core.chunk_planner import Chunk
-from wdt.core.engine_finder import Engine
+from wdt.core.engine_finder import Engine, clear_staged_update
 from wdt.core.format_sniffer import sniff
 
 
@@ -171,6 +171,9 @@ def convert_chunk(
                 outdir = Path(temp_dir) / "out"
                 profile_dir.mkdir(parents=True, exist_ok=True)
                 outdir.mkdir(parents=True, exist_ok=True)
+
+                # 清除可能在此期间 stage 的更新暂存区，防止 soffice 走自更新而忽略转换
+                clear_staged_update(engine.soffice)
 
                 cmd = [
                     str(engine.soffice),

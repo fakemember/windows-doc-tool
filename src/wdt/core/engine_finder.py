@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -30,6 +31,42 @@ def _is_executable(p: Path) -> bool:
         return True
     except OSError:
         return False
+
+
+def clear_staged_update(soffice: Path, max_retries: int = 3) -> bool:
+    """清除 LibreOffice 安装目录中的更新暂存区 updating/。
+
+    LibreOffice 启动时若检测到 updating/（在线更新下载的、尚未应用的补丁
+    暂存区），会优先运行更新器并退出，导致 --convert-to 等参数被完全忽略，
+    表现为"每次启动都在更新、不干活"。暂存区仅包含未应用的更新文件，删除
+    是安全的。soffice 通常位于 <install>/program/ 下，因此同时检查
+    program/ 的上一级与同级目录。
+    """
+    removed = False
+    for root in {soffice.parent.parent, soffice.parent}:
+        staging = root / "updating"
+        if not staging.is_dir():
+            continue
+        for attempt in range(max_retries):
+            try:
+                shutil.rmtree(staging)
+                print(
+                    f"[提示] 已清除 LibreOffice 更新暂存区 (updating/)，"
+                    f"阻止自更新干扰转换: {staging}",
+                    file=sys.stderr,
+                )
+                removed = True
+                break
+            except OSError:
+                if attempt == max_retries - 1:
+                    print(
+                        f"[警告] 无法清除 LibreOffice 更新暂存区，"
+                        f"转换可能被自更新拦截: {staging}",
+                        file=sys.stderr,
+                    )
+                else:
+                    time.sleep(0.2)
+    return removed
 
 
 def _parse_version(soffice_path: Path) -> tuple[int, int] | None:
@@ -115,23 +152,21 @@ def find_engine(
     if bundled_dir is not None:
         b_path = Path(bundled_dir)
         if _is_executable(b_path):
-            soffice = b_path.resolve()
-            return Engine(soffice=soffice, source="bundled", version=_parse_version(soffice))
+            return _make_engine(b_path.resolve(), "bundled")
         if b_path.is_dir():
             found = _check_dir_candidates(b_path)
             if found:
-                return Engine(soffice=found, source="bundled", version=_parse_version(found))
+                return _make_engine(found, "bundled")
 
     # 2. 检查 extra_paths
     for ep in extra_paths:
         p = Path(ep)
         if _is_executable(p):
-            soffice = p.resolve()
-            return Engine(soffice=soffice, source="bundled", version=_parse_version(soffice))
+            return _make_engine(p.resolve(), "bundled")
         if p.is_dir():
             found = _check_dir_candidates(p)
             if found:
-                return Engine(soffice=found, source="bundled", version=_parse_version(found))
+                return _make_engine(found, "bundled")
 
     # 3. 检查 PATH 环境变量
     path_names = (
@@ -142,8 +177,7 @@ def find_engine(
     for name in path_names:
         found_str = shutil.which(name)
         if found_str:
-            soffice = Path(found_str).resolve()
-            return Engine(soffice=soffice, source="path", version=_parse_version(soffice))
+            return _make_engine(Path(found_str).resolve(), "path")
 
     # 4. 检查系统常见安装路径
     sys_candidates: list[Path] = []
@@ -180,7 +214,12 @@ def find_engine(
 
     for cand in sys_candidates:
         if _is_executable(cand):
-            soffice = cand.resolve()
-            return Engine(soffice=soffice, source="system", version=_parse_version(soffice))
+            return _make_engine(cand.resolve(), "system")
 
     raise EngineNotFoundError("未能找到 LibreOffice / soffice 可执行文件。")
+
+
+def _make_engine(soffice: Path, source: str) -> Engine:
+    """构建 Engine 前先清除更新暂存区，避免 soffice 启动时走自更新而不执行转换。"""
+    clear_staged_update(soffice)
+    return Engine(soffice=soffice, source=source, version=_parse_version(soffice))
