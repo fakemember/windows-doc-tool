@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -68,6 +69,139 @@ def _partition_by_unique_stem(files: list[Path]) -> list[list[Path]]:
 
 _MIB = 1024 * 1024
 
+# 预置给每个独立 UserInstallation 的最小注册表配置：
+# 1. 显式禁用 MAR 自动更新器 (Update/Enabled = false)，阻止每次新建沙箱 profile 时发起在线更新检查与下载；
+# 2. 禁用首次运行初始化与 OpenCL 编译检测 (FirstRun = false, UseOpenCL = false)，避免无头转换被后台初始化拖慢或中断。
+_PROFILE_REGISTRY_XCU = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<oor:items xmlns:oor="http://openoffice.org/2001/registry" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<item oor:path="/org.openoffice.Office.Common/Misc"><prop oor:name="FirstRun" oor:op="fuse"><value>false</value></prop></item>
+<item oor:path="/org.openoffice.Office.Common/Misc"><prop oor:name="UseOpenCL" oor:op="fuse"><value>false</value></prop></item>
+<item oor:path="/org.openoffice.Office.Update/Update"><prop oor:name="Enabled" oor:op="fuse"><value>false</value></prop></item>
+<item oor:path="/org.openoffice.Office.Update/Update"><prop oor:name="UpdateRunning" oor:op="fuse"><value>false</value></prop></item>
+<item oor:path="/org.openoffice.Setup/Office"><prop oor:name="ooSetupInstCompleted" oor:op="fuse"><value>true</value></prop></item>
+</oor:items>
+"""
+
+
+def _prepare_profile_dir(profile_dir: Path) -> None:
+    """初始化沙箱 UserInstallation 目录并写入禁用自动更新与首次运行检查的配置。"""
+    user_dir = profile_dir / "user"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    (user_dir / "registrymodifications.xcu").write_text(
+        _PROFILE_REGISTRY_XCU, encoding="utf-8"
+    )
+
+
+# ---------------------------------------------------------------------------
+# SAS RTF 头部声明修复：部分 SAS 输出声明 {\rtf1\ansi 却缺失 \ansicpg936
+# （GBK 代码页），且只使用内联 \s1 等样式标记而没有任何 {\stylesheet} 定义。
+# 后果：LibreOffice 按 Windows-1252 解码中文导致乱码；转换后标题段落全部
+# 退化为 Normal 样式，OOXML 标题检测器无法识别。此处检测并在头部注入缺失
+# 声明后转换为暂存副本：
+# - \ansicpg936：还原 GBK 文本；
+# - {\stylesheet ... \outlinelevelN ... heading N}：让 \sN 标记映射为真正的
+#   Heading N 样式（带大纲级别），转换后现有标题检测器零改动可用。
+# ---------------------------------------------------------------------------
+
+_RTF_HEADER_SAMPLE = 8192
+_RTF_BODY_SAMPLE = 256 * 1024
+_RTF_HEX_ESCAPE_RE = re.compile(rb"\\'([0-9a-fA-F]{2})")
+# 段落样式引用 \sN（排除 \cs 字符样式与多位数 \s10+；SAS 仅用 1~9 级）
+_RTF_SREF_RE = re.compile(rb"(?<![a-zA-Z])\\s([1-9])(?![0-9])")
+
+
+def _rtf_dbcs_candidates(path: Path) -> bytes:
+    """抽样收集 RTF 正文中的双字节候选字节（\'xx 转义值 + 原始高位字节）。"""
+    try:
+        with open(path, "rb") as f:
+            data = f.read(_RTF_BODY_SAMPLE)
+    except OSError:
+        return b""
+    escaped = bytes(int(m.group(1), 16) for m in _RTF_HEX_ESCAPE_RE.finditer(data))
+    stripped = _RTF_HEX_ESCAPE_RE.sub(b"", data)
+    raw = bytes(b for b in stripped if b >= 0x80)
+    return escaped + raw
+
+
+def _looks_like_gbk(candidate: bytes) -> bool:
+    """候选字节流能否按 GB18030 完整解码且以 CJK 汉字为主。"""
+    if len(candidate) < 8:
+        return False
+    try:
+        text = candidate.decode("gb18030")
+    except UnicodeDecodeError:
+        return False
+    meaningful = sum(1 for ch in text if not ch.isspace())
+    if meaningful == 0:
+        return False
+    cjk = sum(1 for ch in text if "一" <= ch <= "鿿")
+    return cjk / meaningful >= 0.5
+
+
+def _stylesheet_fragment(levels: Sequence[int]) -> bytes:
+    r"""按引用到的样式级别构建 {\stylesheet} 块，\sN -> heading N（outlinelevel N-1）。"""
+    parts = []
+    for lvl in sorted(set(levels)):
+        font_size = max(16, 24 - (lvl - 1) * 2)
+        parts.append(
+            b"{\\s%d\\keepn\\sb240\\sa60\\b\\fs%d\\outlinelevel%d heading %d;}"
+            % (lvl, font_size, lvl - 1, lvl)
+        )
+    return b"{\\stylesheet" + b"".join(parts) + b"}"
+
+
+def _rtf_missing_declarations(path: Path) -> tuple[bool, list[int]]:
+    """检测 RTF 缺失的头部声明，返回 (是否缺 \\ansicpg, 被引用但未定义的 \\sN 级别)。"""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(_RTF_HEADER_SAMPLE)
+    except OSError:
+        return False, []
+    if b"{\\rtf1\\ansi" not in head:
+        return False, []
+
+    needs_ansicpg = b"\\ansicpg" not in head and _looks_like_gbk(
+        _rtf_dbcs_candidates(path)
+    )
+
+    levels: list[int] = []
+    if b"{\\stylesheet" not in head:
+        try:
+            with open(path, "rb") as f:
+                body = f.read(_RTF_BODY_SAMPLE)
+        except OSError:
+            body = b""
+        levels = sorted({int(m.group(1)) for m in _RTF_SREF_RE.finditer(body)})
+
+    return needs_ansicpg, levels
+
+
+def _rtf_needs_staging(path: Path) -> bool:
+    """判断 RTF 是否缺失需注入的头部声明。"""
+    needs_ansicpg, levels = _rtf_missing_declarations(path)
+    return needs_ansicpg or bool(levels)
+
+
+def _stage_rtf_fixed(src: Path, stage_dir: Path) -> Path:
+    """复制 RTF 到暂存目录，在 {\rtf1\\ansi 锚点后注入缺失的头部声明。"""
+    needs_ansicpg, levels = _rtf_missing_declarations(src)
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    dst = stage_dir / src.name
+    anchor = b"{\\rtf1\\ansi"
+    with open(src, "rb") as fin, open(dst, "wb") as fout:
+        head = fin.read(_RTF_HEADER_SAMPLE)
+        idx = head.find(anchor)
+        insert_pos = idx + len(anchor) if idx != -1 else len(head)
+        fout.write(head[:insert_pos])
+        if needs_ansicpg:
+            fout.write(b"\\ansicpg936")
+        if levels:
+            fout.write(_stylesheet_fragment(levels))
+        fout.write(head[insert_pos:])
+        shutil.copyfileobj(fin, fout)
+    return dst
+
 
 def _workload_mb(path: Path) -> float:
     """估算 LibreOffice 实际排版处理的文本量（MiB）。
@@ -87,12 +221,16 @@ def _workload_mb(path: Path) -> float:
 
 
 def default_timeout_sec(files: Sequence[Path]) -> int:
-    """按处理量估算转换超时。
+    """按处理量与源格式估算转换超时。
 
-    基准实测（2,900 页真实 Listing）：RTF→docx 约 1.27s/MiB，docx→PDF
-    约 1.35s/MiB，统一取 2s/MiB 留余量，保底 300s。
+    基准实测：含高密表格的 SAS Listing（3,740 页、100,000 行表格）排版
+    开销约 13.5~18 s/MiB（rtf/doc 源按磁盘体积计）；docx 源按解压后
+    document.xml 体积计约 1.35 s/MiB。统一取 20 s/MiB（rtf/doc）与
+    2 s/MiB（docx）留余量，保底 300s。
     """
-    return int(300 + 2 * sum(_workload_mb(f) for f in files))
+    rtf_doc_mb = sum(_workload_mb(f) for f in files if sniff(f) != "docx")
+    docx_mb = sum(_workload_mb(f) for f in files if sniff(f) == "docx")
+    return int(300 + 20 * rtf_doc_mb + 2 * docx_mb)
 
 
 def convert_chunk(
@@ -169,7 +307,7 @@ def convert_chunk(
             try:
                 profile_dir = Path(temp_dir) / "profile"
                 outdir = Path(temp_dir) / "out"
-                profile_dir.mkdir(parents=True, exist_ok=True)
+                _prepare_profile_dir(profile_dir)
                 outdir.mkdir(parents=True, exist_ok=True)
 
                 # 清除可能在此期间 stage 的更新暂存区，防止 soffice 走自更新而忽略转换
@@ -189,11 +327,24 @@ def convert_chunk(
                 if fmt == "rtf":
                     cmd.append("--infilter=Rich Text Format")
 
+                # SAS RTF 头部声明修复：缺失 \ansicpg 或缺失 {\stylesheet} 映射的文件，
+                # 转换为注入补齐声明的暂存副本（文件名不变，产物命名不受影响）
+                if fmt == "rtf":
+                    stage_dir = Path(temp_dir) / "rtf_staged"
+                    batch_inputs = [
+                        _stage_rtf_fixed(src, stage_dir)
+                        if _rtf_needs_staging(src)
+                        else src
+                        for src in batch
+                    ]
+                else:
+                    batch_inputs = list(batch)
+
                 cmd.extend([
                     "--convert-to", target_arg,
                     "--outdir", str(outdir),
                 ])
-                cmd.extend(str(f) for f in batch)
+                cmd.extend(str(f) for f in batch_inputs)
 
                 popen_kwargs = {}
                 if sys.platform != "win32":

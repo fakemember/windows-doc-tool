@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from wdt.core.chunk_planner import Chunk
 from wdt.core.converter_worker import (
+    _prepare_profile_dir,
     _workload_mb,
     convert_chunk,
     default_timeout_sec,
@@ -134,10 +135,109 @@ def test_workload_mb_falls_back_to_disk_size(tmp_path: Path):
 def test_default_timeout_scales_with_uncompressed_size(tmp_path: Path):
     docx = _make_compressible_docx(tmp_path / "big.docx", xml_size=8 * 1024 * 1024)
     docx_timeout = default_timeout_sec([docx])
-    # 旧公式按磁盘 <1MB 算只会给 ~300s，会误杀实测需 580s 的同类文件
+    # docx 源按解压后体积以 2 s/MiB 估算
     assert docx_timeout >= 300 + 2 * 7
 
     rtf = tmp_path / "a.rtf"
     rtf.write_bytes(b"{\\rtf1\\ansi " + b"y" * (1024 * 1024) + b"}")
     rtf_timeout = default_timeout_sec([rtf])
-    assert 300 + 1 <= rtf_timeout < docx_timeout
+    # rtf/doc 源（高密表格排版）按 20 s/MiB 估算，高于同体积 docx
+    assert 300 + 20 <= rtf_timeout
+    assert rtf_timeout > docx_timeout
+
+
+# --- SAS RTF 头部声明修复（\ansicpg936 与 {\stylesheet} 注入） --------------
+
+
+def _make_gbk_rtf(
+    with_ansicpg: bool = False,
+    with_stylesheet: bool = False,
+    body: bytes | None = None,
+) -> bytes:
+    cpg = b"\\ansicpg936" if with_ansicpg else b""
+    ss = b"{\\stylesheet{\\s1 heading 1;}}" if with_stylesheet else b""
+    payload = body if body is not None else "筛选情况（筛选受试者）".encode("gbk")
+    return (
+        b"{\\rtf1\\ansi"
+        + cpg
+        + ss
+        + b"\\deff0 {\\fonttbl{\\f0 Arial;}}\\f0\\fs24\\s1 "
+        + payload
+        + b"\\par}"
+    )
+
+
+def test_rtf_missing_declarations_gbk_and_stylesheet(tmp_path: Path):
+    """同时缺失 \\ansicpg 与 \\stylesheet，且正文包含 \\s1 引用与 GBK 内容"""
+    from wdt.core.converter_worker import _rtf_missing_declarations, _rtf_needs_staging
+
+    rtf = tmp_path / "sample.rtf"
+    rtf.write_bytes(_make_gbk_rtf())
+
+    needs_ansicpg, levels = _rtf_missing_declarations(rtf)
+    assert needs_ansicpg is True
+    assert levels == [1]
+    assert _rtf_needs_staging(rtf) is True
+
+
+def test_rtf_missing_declarations_already_declared(tmp_path: Path):
+    """已声明 \\ansicpg 且包含 \\stylesheet → 无需暂存"""
+    from wdt.core.converter_worker import _rtf_missing_declarations, _rtf_needs_staging
+
+    rtf = tmp_path / "declared.rtf"
+    rtf.write_bytes(_make_gbk_rtf(with_ansicpg=True, with_stylesheet=True))
+
+    needs_ansicpg, levels = _rtf_missing_declarations(rtf)
+    assert needs_ansicpg is False
+    assert levels == []
+    assert _rtf_needs_staging(rtf) is False
+
+
+def test_rtf_missing_declarations_ascii_no_styles(tmp_path: Path):
+    """纯 ASCII 且正文无 \\sN 引用 → 无需暂存"""
+    from wdt.core.converter_worker import _rtf_missing_declarations, _rtf_needs_staging
+
+    rtf = tmp_path / "ascii.rtf"
+    rtf.write_bytes(b"{\\rtf1\\ansi\\deff0 {\\fonttbl{\\f0 Arial;}}\\f0 Hello World\\par}")
+
+    needs_ansicpg, levels = _rtf_missing_declarations(rtf)
+    assert needs_ansicpg is False
+    assert levels == []
+    assert _rtf_needs_staging(rtf) is False
+
+
+def test_stage_rtf_fixed_injects_both(tmp_path: Path):
+    r"""暂存副本同时注入 \ansicpg936 与 {\stylesheet}，且跨 8KB 采样边界无损"""
+    from wdt.core.converter_worker import _stage_rtf_fixed
+
+    src = tmp_path / "big.doc"
+    body_tail = b"x" * 100
+    src.write_bytes(_make_gbk_rtf()[:-1].ljust(8192, b"y") + body_tail + b"}")
+    stage_dir = tmp_path / "stage"
+
+    staged = _stage_rtf_fixed(src, stage_dir)
+
+    assert staged == stage_dir / src.name
+    staged_bytes = staged.read_bytes()
+    assert staged_bytes.startswith(b"{\\rtf1\\ansi\\ansicpg936{\\stylesheet")
+    assert b"\\outlinelevel0 heading 1;" in staged_bytes
+
+    orig = src.read_bytes()
+    anchor = b"{\\rtf1\\ansi"
+    insert_pos = orig.find(anchor) + len(anchor)
+    # 头部注入后，后面的原始内容逐字节保留
+    injected_header = staged_bytes[: staged_bytes.find(b"\\deff0")]
+    assert b"\\ansicpg936" in injected_header
+    assert b"{\\stylesheet" in injected_header
+    assert orig[insert_pos:] == staged_bytes[len(injected_header) :]
+
+
+def test_prepare_profile_dir_disables_updater_and_firstrun(tmp_path: Path):
+    profile_dir = tmp_path / "profile"
+    _prepare_profile_dir(profile_dir)
+    xcu = profile_dir / "user" / "registrymodifications.xcu"
+    assert xcu.is_file()
+    content = xcu.read_text(encoding="utf-8")
+    assert '/org.openoffice.Office.Update/Update' in content
+    assert '<prop oor:name="Enabled" oor:op="fuse"><value>false</value></prop>' in content
+    assert '<prop oor:name="FirstRun" oor:op="fuse"><value>false</value></prop>' in content

@@ -24,6 +24,11 @@ def create_fake_lo_tree(root: Path) -> dict[str, Path]:
         "program_soffice_bin": root / "program" / "soffice.bin",
         "program_soffice_com": root / "program" / "soffice.com",
         "program_writer_dll": root / "program" / "writer.dll",
+        # program/ 在线更新器组件与顶层更新配置（应该被删除）
+        "program_updater_exe": root / "program" / "updater.exe",
+        "program_update_service_exe": root / "program" / "update_service.exe",
+        "program_updater_ini": root / "program" / "updater.ini",
+        "update_settings_ini": root / "update-settings.ini",
         # share/program/ （必须绝对保护）
         "share_program_dll": root / "share" / "program" / "keep.dll",
         # share/help/ （应该被删除）
@@ -62,8 +67,15 @@ def test_prune_plan_targets_and_preservation(tmp_path: Path):
     plan = prune_plan(fake_lo)
     plan_posix = {p.as_posix() for p in plan}
 
-    # 1. 绝对保护 program/ 及其子项
-    assert not any(p.parts[0] == "program" for p in plan)
+    # 1. 绝对保护 program/ 核心二进制与 DLL，同时裁剪在线更新器组件
+    assert "program/soffice.exe" not in plan_posix
+    assert "program/soffice.bin" not in plan_posix
+    assert "program/soffice.com" not in plan_posix
+    assert "program/writer.dll" not in plan_posix
+    assert "program/updater.exe" in plan_posix
+    assert "program/update_service.exe" in plan_posix
+    assert "program/updater.ini" in plan_posix
+    assert "update-settings.ini" in plan_posix
 
     # 2. 绝对保护 share/program/ 及其子项
     assert not any(p.parts[:2] == ("share", "program") for p in plan)

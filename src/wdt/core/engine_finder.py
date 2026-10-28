@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,24 +35,45 @@ def _is_executable(p: Path) -> bool:
 
 
 def clear_staged_update(soffice: Path, max_retries: int = 3) -> bool:
-    """清除 LibreOffice 安装目录中的更新暂存区 updating/。
+    """清除 LibreOffice 相关的更新暂存区及更新状态。
 
-    LibreOffice 启动时若检测到 updating/（在线更新下载的、尚未应用的补丁
-    暂存区），会优先运行更新器并退出，导致 --convert-to 等参数被完全忽略，
-    表现为"每次启动都在更新、不干活"。暂存区仅包含未应用的更新文件，删除
-    是安全的。soffice 通常位于 <install>/program/ 下，因此同时检查
-    program/ 的上一级与同级目录。
+    LibreOffice 启动时若检测到更新暂存区（updating/ 或 Data/settings/updates/0
+    下的 pending-service 补丁），会优先唤起 updater.exe 弹出更新对话框并退出，
+    导致 --convert-to 等参数被完全忽略，表现为"每次启动都在更新、不干活"。
+    同时尝试移除 program/ 下的 updater.exe 与 update_service.exe，从根源阻断更新器。
     """
     removed = False
-    for root in {soffice.parent.parent, soffice.parent}:
-        staging = root / "updating"
-        if not staging.is_dir():
+    prog_dir = soffice.parent
+    for updater_bin in ("updater.exe", "update_service.exe", "updater.ini"):
+        target_file = prog_dir / updater_bin
+        try:
+            if target_file.is_file():
+                target_file.unlink()
+                removed = True
+        except OSError:
+            pass
+
+    candidate_dirs: set[Path] = set()
+    for root in {
+        prog_dir,
+        prog_dir.parent,
+        prog_dir.parent.parent,
+        prog_dir.parent.parent.parent,
+    }:
+        candidate_dirs.add(root / "updating")
+        candidate_dirs.add(root / "Data" / "settings" / "updates")
+
+    for staging in candidate_dirs:
+        try:
+            if not staging.is_dir():
+                continue
+        except OSError:
             continue
         for attempt in range(max_retries):
             try:
                 shutil.rmtree(staging)
                 print(
-                    f"[提示] 已清除 LibreOffice 更新暂存区 (updating/)，"
+                    f"[提示] 已清除 LibreOffice 更新暂存区，"
                     f"阻止自更新干扰转换: {staging}",
                     file=sys.stderr,
                 )
@@ -70,19 +92,58 @@ def clear_staged_update(soffice: Path, max_retries: int = 3) -> bool:
 
 
 def _parse_version(soffice_path: Path) -> tuple[int, int] | None:
+    # 1. 优先尝试从同级目录下的 version.ini 读取，零子进程开销且绝不触发更新器
     try:
-        res = subprocess.run(
-            [str(soffice_path), "--version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=5,
-        )
-        if res.returncode != 0:
-            return None
-        m = re.search(r"(\d+)\.(\d+)", res.stdout)
-        if m:
-            return int(m.group(1)), int(m.group(2))
+        version_ini = soffice_path.parent / "version.ini"
+        if version_ini.is_file():
+            content = version_ini.read_text(encoding="utf-8", errors="replace")
+            m = re.search(r"^ProductKey\s*=\s*LibreOffice\s*(\d+)\.(\d+)", content, re.MULTILINE | re.IGNORECASE)
+            if not m:
+                m = re.search(r"UpdateID\s*=\s*LibreOffice_(\d+)", content, re.IGNORECASE)
+                if m:
+                    return int(m.group(1)), 0
+            if m:
+                return int(m.group(1)), int(m.group(2))
+    except Exception:
+        pass
+
+    # 2. 从 bootstrap.ini 备用读取 ProductKey
+    try:
+        bootstrap_ini = soffice_path.parent / "bootstrap.ini"
+        if bootstrap_ini.is_file():
+            content = bootstrap_ini.read_text(encoding="utf-8", errors="replace")
+            m = re.search(r"^ProductKey\s*=\s*LibreOffice\s*(\d+)\.(\d+)", content, re.MULTILINE | re.IGNORECASE)
+            if m:
+                return int(m.group(1)), int(m.group(2))
+    except Exception:
+        pass
+
+    # 3. 回退到子进程命令行调用（传入隔离 profile 避免触发更新与污染全局配置）
+    try:
+        with tempfile.TemporaryDirectory(prefix="wdt_lo_ver_") as tmp_dir:
+            profile_url = Path(tmp_dir).resolve().as_uri()
+            res = subprocess.run(
+                [
+                    str(soffice_path),
+                    "--headless",
+                    "--norestore",
+                    "--nolockcheck",
+                    "--nodefault",
+                    "--nologo",
+                    "--nofirststartwizard",
+                    f"-env:UserInstallation={profile_url}",
+                    "--version",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+            if res.returncode != 0:
+                return None
+            m = re.search(r"(\d+)\.(\d+)", res.stdout)
+            if m:
+                return int(m.group(1)), int(m.group(2))
     except Exception:
         return None
     return None

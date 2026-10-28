@@ -104,6 +104,35 @@ def test_clear_staged_update_flat_layout(tmp_path: Path):
     assert not staging.exists()
 
 
+def test_clear_staged_update_removes_portable_data_updates(tmp_path: Path):
+    """便携版布局下，应清除 Data/settings/updates 下的 MAR 更新暂存目录。"""
+    prog = tmp_path / "runtime" / "libreoffice" / "program"
+    prog.mkdir(parents=True)
+    soffice = prog / "soffice.com"
+    soffice.write_text("dummy")
+
+    updates_dir = tmp_path / "Data" / "settings" / "updates" / "0"
+    updates_dir.mkdir(parents=True)
+    (updates_dir / "update.mar").write_text("staged-mar")
+    (updates_dir / "update.status").write_text("pending-service")
+
+    assert clear_staged_update(soffice) is True
+    assert not (tmp_path / "Data" / "settings" / "updates").exists()
+
+
+def test_parse_version_from_bootstrap_ini(tmp_path: Path):
+    """优先从 bootstrap.ini / version.ini 解析版本号，无需启动 soffice 子进程。"""
+    prog = tmp_path / "program"
+    prog.mkdir(parents=True)
+    soffice = prog / "soffice.com"
+    soffice.write_text("dummy")
+    (prog / "bootstrap.ini").write_text(
+        "[Bootstrap]\nProductKey=LibreOffice 24.8\n", encoding="utf-8"
+    )
+
+    assert _parse_version(soffice) == (24, 8)
+
+
 def test_clear_staged_update_noop(tmp_path: Path):
     soffice = tmp_path / "program" / "soffice"
     soffice.parent.mkdir(parents=True)

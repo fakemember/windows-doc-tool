@@ -29,6 +29,17 @@ MINIMAL_RTF = (
     b"}"
 )
 
+SMOKE_REGISTRY_XCU = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<oor:items xmlns:oor="http://openoffice.org/2001/registry" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<item oor:path="/org.openoffice.Office.Common/Misc"><prop oor:name="FirstRun" oor:op="fuse"><value>false</value></prop></item>
+<item oor:path="/org.openoffice.Office.Common/Misc"><prop oor:name="UseOpenCL" oor:op="fuse"><value>false</value></prop></item>
+<item oor:path="/org.openoffice.Office.Update/Update"><prop oor:name="Enabled" oor:op="fuse"><value>false</value></prop></item>
+<item oor:path="/org.openoffice.Office.Update/Update"><prop oor:name="UpdateRunning" oor:op="fuse"><value>false</value></prop></item>
+<item oor:path="/org.openoffice.Setup/Office"><prop oor:name="ooSetupInstCompleted" oor:op="fuse"><value>true</value></prop></item>
+</oor:items>
+"""
+
 
 def _is_non_enzh_dict_item(rel: Path) -> bool:
     """判定 share/dict 下的项目是否为非 en/zh 词典项。"""
@@ -54,8 +65,16 @@ class PruneRule:
 
 
 # 显式规则列表：只裁剪 share/ 下安全且占体积的组件，
-# 以及顶层 updating/（LO 自带更新器的补丁暂存区——保留它会触发首次启动自更新，
-# 导致运行时目录被后台进程修改并锁定文件，必须裁掉）
+# 以及自更新器可执行文件、配置与暂存区（保留它们会触发启动自更新检查/补丁应用，
+# 导致转换请求被更新器拦截或运行时目录被后台进程锁定，必须彻底裁掉）
+UPDATER_PROGRAM_FILES = frozenset(
+    {
+        "updater.exe",
+        "update_service.exe",
+        "updater.ini",
+    }
+)
+
 PRUNE_RULES: list[PruneRule] = [
     PruneRule(
         name="help",
@@ -94,6 +113,19 @@ PRUNE_RULES: list[PruneRule] = [
         pattern="updating/**",
         matcher=lambda rel: len(rel.parts) >= 1 and rel.parts[0] == "updating",
     ),
+    PruneRule(
+        name="updater_components",
+        description="内置在线更新器组件 (update-settings.ini, program/updater*)",
+        pattern="update-settings.ini | program/{updater.exe,update_service.exe,updater.ini}",
+        matcher=lambda rel: (
+            len(rel.parts) == 1 and rel.parts[0].lower() == "update-settings.ini"
+        )
+        or (
+            len(rel.parts) == 2
+            and rel.parts[0] == "program"
+            and rel.parts[1].lower() in UPDATER_PROGRAM_FILES
+        ),
+    ),
 ]
 
 
@@ -114,11 +146,17 @@ def prune_plan(source: Path) -> list[Path]:
     for item in source.rglob("*"):
         rel = item.relative_to(source)
         parts = rel.parts
-        # 严格安全边界：除 share/ 与 updating/ 外的顶层目录绝对不删（program/、App/ 等）
-        if not parts or parts[0] not in ("share", "updating"):
+        if not parts:
             continue
         # share/program 绝对不删
         if parts[0] == "share" and len(parts) >= 2 and parts[1] == "program":
+            continue
+        # program/ 下仅允许删除在线更新器组件，核心文件与 DLL 绝对保护
+        if parts[0] == "program" and (
+            len(parts) != 2 or parts[1].lower() not in UPDATER_PROGRAM_FILES
+        ):
+            continue
+        if parts[0] not in ("share", "updating", "program") and parts[0].lower() != "update-settings.ini":
             continue
 
         for rule in PRUNE_RULES:
@@ -188,7 +226,11 @@ def run_smoke_test(soffice_path: Path, attempts: int = 3) -> bool:
         out_dir = tmp_dir / "out"
         out_dir.mkdir(parents=True, exist_ok=True)
         profile_dir = tmp_dir / "profile"
-        profile_dir.mkdir(parents=True, exist_ok=True)
+        user_dir = profile_dir / "user"
+        user_dir.mkdir(parents=True, exist_ok=True)
+        (user_dir / "registrymodifications.xcu").write_text(
+            SMOKE_REGISTRY_XCU, encoding="utf-8"
+        )
         profile_url = profile_dir.resolve().as_uri()
 
         cmd = [

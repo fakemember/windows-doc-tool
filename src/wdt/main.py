@@ -667,6 +667,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # Windows 下尝试附着控制台（供命令行终端实时输出）
     has_console = _attach_windows_console()
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
 
     # 桌面用户双击桌面图标、快捷方式或直接双击 wdt.exe 启动时无传入参数，且无控制台
     # 此时默认直接启动图形界面 (GUI)；若在终端命令行或测试环境中无参数运行，则打印帮助信息

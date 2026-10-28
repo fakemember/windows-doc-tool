@@ -53,6 +53,11 @@ class NoHeadingError(ValueError):
     pass
 
 
+# 跨页续表头标记：SAS Listing 每页重复输出带 "(Continued)" / "（续）" 的表头
+# 若原文档将其标记为标题样式，目录生成时应过滤去重
+_CONTINUED_HEADING_RE = re.compile(r"(?i)\(\s*continued\s*\)|（\s*续\s*）|\(\s*续\s*\)")
+
+
 def _generate_bookmark_prefix(doc_bytes: bytes) -> str:
     """生成不与文档既有书签前缀冲突的新前缀"""
     existing_names = re.findall(rb'<w:bookmarkStart\b[^>]*?w:name="([^"]+)"', doc_bytes)
@@ -223,7 +228,12 @@ def inject_toc(
     styles_bytes = styles_xml.encode("utf-8")
     all_headings = detect_headings(doc_bytes, styles_bytes)
     safe_depth = max(1, min(config.depth, 3))
-    valid_headings = [h for h in all_headings if h.level <= safe_depth]
+    # 过滤超过目标深度的标题及跨页续表头（如 SAS Listing 每页重复的 "(Continued)"）
+    valid_headings = [
+        h
+        for h in all_headings
+        if h.level <= safe_depth and not _CONTINUED_HEADING_RE.search(h.text)
+    ]
 
     if not valid_headings:
         raise NoHeadingError(f"未在文档中检测到符合深度 <= {safe_depth} 的标题")

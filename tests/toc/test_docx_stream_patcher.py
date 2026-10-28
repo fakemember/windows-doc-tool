@@ -4,6 +4,7 @@ tests/toc/test_docx_stream_patcher.py
 4种样式注入与 XML well-formed、书签避让、动态/静态模式、分节重启、占位符替换等。
 """
 
+import re
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
@@ -316,4 +317,29 @@ def test_backup_behavior(tmp_path: Path):
     bak_path2 = docx_file2.with_name(docx_file2.name + ".bak")
     assert not bak_path2.exists()
     assert report2.backup_path is None
+
+
+def test_inject_toc_filters_continued_headings(tmp_path: Path):
+    """跨页续表头（带 (Continued) 或 （续） 的标题）在目录构建时自动过滤"""
+    docx_file = tmp_path / "test_continued_filter.docx"
+    build_docx(
+        docx_file,
+        [
+            {"text": "16.2.1.1 筛选情况", "pstyle": "Heading1"},
+            {"text": "正文内容 1"},
+            {"text": "16.2.1.1 筛选情况 (Continued)", "pstyle": "Heading1"},
+            {"text": "正文内容 2"},
+            {"text": "16.2.1.1 筛选情况（续）", "pstyle": "Heading1"},
+            {"text": "16.2.1.2 随机情况", "pstyle": "Heading1"},
+        ],
+    )
+    report = inject_toc(docx_file, TocConfig(depth=2))
+    assert report.entries == 2  # 仅 2 条真正标题进入目录，续表头被剔除
+
+    doc_str, _, _ = _read_docx_xmls(docx_file)
+    ET.fromstring(doc_str)
+    # 正文中的 (Continued) 段落仍保留，但目录超链接锚点仅为 2 条
+    anchors = re.findall(r'w:anchor="(_WDToc\d+)"', doc_str)
+    assert len(anchors) == 2
+
 
