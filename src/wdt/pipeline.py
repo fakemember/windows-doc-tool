@@ -9,6 +9,7 @@ Windows Doc Tool (wdt) 业务流水线模块。
 
 from __future__ import annotations
 
+import logging
 import shutil
 import tempfile
 import time
@@ -21,6 +22,7 @@ from pypdf import PdfReader, PdfWriter
 
 from wdt.core.batch_runner import BatchRunner
 from wdt.core.converter_worker import FileResult
+from wdt.core.docx_normalizer import normalize_docx
 from wdt.core.engine_finder import Engine, EngineNotFoundError, find_engine
 from wdt.toc.docx_stream_patcher import (
     NoHeadingError,
@@ -29,7 +31,14 @@ from wdt.toc.docx_stream_patcher import (
     inject_toc,
 )
 from wdt.toc.page_calculator import PageMode
+from wdt.toc.page_measurer import (
+    build_measurement_copy,
+    measure_pages_from_pdf,
+    patch_docx_measured_pages,
+)
 from wdt.toc.zip_rewriter import _find_seven_zip
+
+logger = logging.getLogger(__name__)
 
 
 class Stage(Enum):
@@ -96,6 +105,81 @@ def resolve_destination(
     return src.parent / f"{src.stem}{target_ext}"
 
 
+def _safe_normalize_converted(docx_file: Path, seven_zip_path: Path | None) -> None:
+    """规范化 LibreOffice 转换产物，失败不阻断流水线。"""
+    try:
+        normalize_docx(docx_file, seven_zip=seven_zip_path)
+    except Exception as e:
+        logger.warning("DOCX 规范化失败 (%s): %s", docx_file.name, e)
+
+
+def _perform_page_measurement(
+    docx_file: Path,
+    report: TocReport,
+    config: TocConfig,
+    runner: BatchRunner,
+    seven_zip_path: Path | None = None,
+) -> tuple[bool, list[int], str]:
+    """执行 measured 模式的两遍测量与回写。
+    
+    返回 (is_measured_success, final_pages, message)
+    """
+    with tempfile.TemporaryDirectory(prefix="wdt_measure_") as tmp_dir:
+        tmp_docx = Path(tmp_dir) / f"{docx_file.stem}_measure.docx"
+        tmp_pdf = Path(tmp_dir) / f"{docx_file.stem}_measure.pdf"
+        try:
+            build_measurement_copy(docx_file, tmp_docx)
+        except Exception as e:
+            logger.warning("测量副本生成失败: %s，回退估算页码", e)
+            patch_docx_measured_pages(
+                docx_file,
+                measured_pages=report.pages,
+                bookmark_names=report.bookmark_names,
+                sentinel_id=report.sentinel,
+                seven_zip=seven_zip_path,
+            )
+            return False, report.pages, f"测量副本生成异常({e})，已回退估算页码"
+
+        results = runner.convert([(tmp_docx, tmp_pdf)], target="pdf")
+        if not results or not results[0].ok or not tmp_pdf.is_file():
+            err = results[0].error if results else "临时PDF转换失败"
+            logger.warning("实测临时 PDF 导出失败: %s，回退估算页码", err)
+            patch_docx_measured_pages(
+                docx_file,
+                measured_pages=report.pages,
+                bookmark_names=report.bookmark_names,
+                sentinel_id=report.sentinel,
+                seven_zip=seven_zip_path,
+            )
+            return False, report.pages, f"临时PDF转换异常({err})，已回退估算页码"
+
+        measured = measure_pages_from_pdf(
+            tmp_pdf,
+            heading_count=report.entries,
+            sentinel_id=report.sentinel,
+            page_offset=config.page_offset,
+        )
+        if measured is not None:
+            patch_docx_measured_pages(
+                docx_file,
+                measured_pages=measured,
+                bookmark_names=report.bookmark_names,
+                sentinel_id=report.sentinel,
+                seven_zip=seven_zip_path,
+            )
+            return True, measured, "实测页码成功"
+        else:
+            logger.warning("实测未找齐标题锚点，回退估算页码")
+            patch_docx_measured_pages(
+                docx_file,
+                measured_pages=report.pages,
+                bookmark_names=report.bookmark_names,
+                sentinel_id=report.sentinel,
+                seven_zip=seven_zip_path,
+            )
+            return False, report.pages, "未找齐标题锚点，已回退估算页码"
+
+
 def run_pipeline(
     files: Sequence[Path],
     options: PipelineOptions,
@@ -125,9 +209,13 @@ def run_pipeline(
         raise ValueError("convert 模式必须至少启用 make_docx 或 make_pdf 之一")
 
     # 2. 转换引擎准备
-    if options.mode in ("convert", "run"):
-        if engine is None:
-            engine = find_engine()
+    needs_engine = options.mode in ("convert", "run") or (
+        options.mode == "toc"
+        and options.toc is not None
+        and options.toc.page_mode == PageMode.STATIC_MEASURED
+    )
+    if needs_engine and engine is None:
+        engine = find_engine()
 
     events: list[PipelineEvent] = []
 
@@ -245,13 +333,17 @@ def run_pipeline(
                     f"{res.elapsed:.2f}s" if res.ok else res.error,
                 )
 
-            runner.convert(
+            convert_results = runner.convert(
                 work_pairs,
                 target=cur_target,  # type: ignore[arg-type]
                 gray=use_gray,
                 progress_cb=_on_progress,
                 should_cancel=should_cancel,
             )
+            if cur_target == "docx":
+                for r in convert_results or []:
+                    if r.ok and r.dst is not None:
+                        _safe_normalize_converted(r.dst, seven_zip_path)
 
         return events
 
@@ -273,17 +365,24 @@ def run_pipeline(
                 report: TocReport = inject_toc(
                     src, options.toc, seven_zip=seven_zip_path
                 )
+
+                measure_msg = ""
+                if options.toc.page_mode == PageMode.STATIC_MEASURED:
+                    assert runner is not None
+                    succ, final_pages, measure_msg = _perform_page_measurement(
+                        src, report, options.toc, runner, seven_zip_path=seven_zip_path
+                    )
+                    report.pages = final_pages
+
                 pages_summary = (
                     f"{report.pages}"
                     if len(report.pages) <= 5
                     else f"[{report.pages[0]}..{report.pages[-1]}]"
                 )
-                emit(
-                    Stage.TOC,
-                    src,
-                    "ok",
-                    f"条目: {report.entries}, 页码: {pages_summary}, 耗时: {report.elapsed:.2f}s",
-                )
+                detail = f"条目: {report.entries}, 页码: {pages_summary}, 耗时: {report.elapsed:.2f}s"
+                if measure_msg:
+                    detail += f" ({measure_msg})"
+                emit(Stage.TOC, src, "ok", detail)
             except NoHeadingError as e:
                 emit(Stage.TOC, src, "failed", str(e))
             except Exception as e:
@@ -353,6 +452,7 @@ def run_pipeline(
             )
             for r in c_results:
                 if r.ok and r.dst is not None:
+                    _safe_normalize_converted(r.dst, seven_zip_path)
                     ready_docxs.append((r.src, r.dst))
 
         # 阶段 2: 注入 TOC 目录
@@ -364,13 +464,19 @@ def run_pipeline(
 
             try:
                 report = inject_toc(d, options.toc, seven_zip=seven_zip_path)
+
+                measure_msg = ""
+                if options.toc.page_mode == PageMode.STATIC_MEASURED:
+                    succ, final_pages, measure_msg = _perform_page_measurement(
+                        d, report, options.toc, runner, seven_zip_path=seven_zip_path
+                    )
+                    report.pages = final_pages
+
                 injected_docxs.append((orig_src, d))
-                emit(
-                    Stage.TOC,
-                    orig_src,
-                    "ok",
-                    f"条目: {report.entries}, 耗时: {report.elapsed:.2f}s",
-                )
+                msg = f"条目: {report.entries}, 耗时: {report.elapsed:.2f}s"
+                if measure_msg:
+                    msg += f" ({measure_msg})"
+                emit(Stage.TOC, orig_src, "ok", msg)
             except Exception as e:
                 emit(Stage.TOC, orig_src, "failed", str(e))
 
