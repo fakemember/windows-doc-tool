@@ -343,3 +343,101 @@ def test_inject_toc_filters_continued_headings(tmp_path: Path):
     assert len(anchors) == 2
 
 
+
+
+def test_measured_page_mode_injection(tmp_path: Path):
+    """验证 STATIC_MEASURED 模式：初始占位 0、插入 sentinel 段落与标题隐藏锚点"""
+    docx_file = tmp_path / "test_measured.docx"
+    build_docx(
+        docx_file,
+        [
+            {"text": "标题一", "pstyle": "Heading1"},
+            {"text": "正文内容"},
+            {"text": "标题二", "pstyle": "Heading1"},
+        ],
+    )
+    report = inject_toc(docx_file, TocConfig(page_mode=PageMode.STATIC_MEASURED))
+    assert report.entries == 2
+    assert report.sentinel != ""
+    assert len(report.bookmark_names) == 2
+
+    doc_str, _, _ = _read_docx_xmls(docx_file)
+    ET.fromstring(doc_str)
+
+    # 包含占位 0
+    assert "<w:t>0</w:t>" in doc_str
+    # 包含 sentinel
+    assert f"WDTSENTINEL{report.sentinel}" in doc_str
+    # 包含隐藏锚点 WDTTAG0000 与 WDTTAG0001
+    assert "WDTTAG0000" in doc_str
+    assert "WDTTAG0001" in doc_str
+
+
+def test_strip_existing_toc_during_inject(tmp_path: Path):
+    """验证在 inject_toc 前先行剥离旧目录"""
+    docx_file = tmp_path / "test_old_toc_strip.docx"
+    build_docx(
+        docx_file,
+        [
+            {"text": "目 录", "pstyle": "TOCHeading"},
+            {"text": "旧目录条目", "pstyle": "TOC1"},
+            {"text": "真正标题 1", "pstyle": "Heading1"},
+        ],
+    )
+    # 手工在 document.xml 里注入旧 sdt
+    with zipfile.ZipFile(docx_file, "r") as z:
+        old_xml = z.read("word/document.xml").decode("utf-8")
+        styles_xml = z.read("word/styles.xml")
+    
+    sdt_toc = (
+        '<w:sdt><w:sdtPr><w:docPartGallery w:val="Table of Contents"/></w:sdtPr>'
+        '<w:sdtContent><w:p><w:r><w:t>Old SDT</w:t></w:r></w:p></w:sdtContent></w:sdt>'
+    )
+    patched_xml = old_xml.replace("<w:body>", f"<w:body>{sdt_toc}")
+    with zipfile.ZipFile(docx_file, "w") as z:
+        z.writestr("word/document.xml", patched_xml.encode("utf-8"))
+        z.writestr("word/styles.xml", styles_xml)
+
+    report = inject_toc(docx_file, TocConfig(title="新目录"))
+    assert report.entries == 1
+
+    doc_str, _, _ = _read_docx_xmls(docx_file)
+    ET.fromstring(doc_str)
+    assert "Old SDT" not in doc_str
+    assert "新目录" in doc_str
+    assert "真正标题 1" in doc_str
+
+
+def test_body_font_detection_and_tab_pos(tmp_path: Path):
+    """验证从 styles.xml 探测正文字体并覆盖，且根据 sectPr 自适应右制表位"""
+    from wdt.toc.docx_stream_patcher import detect_body_font
+    styles_xml = """<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:docDefaults>
+            <w:rPrDefault>
+                <w:rPr>
+                    <w:rFonts w:ascii="Arial" w:eastAsia="SimHei" w:hAnsi="Arial"/>
+                </w:rPr>
+            </w:rPrDefault>
+        </w:docDefaults>
+        <w:style w:type="paragraph" w:styleId="Heading1">
+            <w:name w:val="heading 1"/>
+            <w:pPr><w:outlineLvl w:val="0"/></w:pPr>
+        </w:style>
+    </w:styles>"""
+    body_font = detect_body_font(styles_xml)
+    assert body_font is not None
+    assert body_font.ascii == "Arial"
+    assert body_font.eastAsia == "SimHei"
+
+    docx_file = tmp_path / "test_font_tab.docx"
+    build_docx(
+        docx_file,
+        [{"text": "标题一", "pstyle": "Heading1"}],
+        styles_xml=styles_xml,
+    )
+    inject_toc(docx_file, TocConfig())
+    doc_str, _, _ = _read_docx_xmls(docx_file)
+    ET.fromstring(doc_str)
+    assert 'w:eastAsia="SimHei"' in doc_str
+    # 默认 A4: 11906 - 1440 - 1440 = 9026
+    assert 'w:pos="8906"' in doc_str

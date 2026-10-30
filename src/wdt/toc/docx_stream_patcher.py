@@ -1,6 +1,6 @@
 """
 DOCX 字节流注入器：TOC 目录注入引擎主入口。
-纯 Python 字节流切片、书签全局避让、分节页码重启、4 样式注入及原子写回。
+纯 Python 字节流切片、旧目录自动剥离、书签全局避让、分节页码重启/实测锚点、4 样式注入及原子写回。
 """
 
 from __future__ import annotations
@@ -9,14 +9,17 @@ import html
 import re
 import shutil
 import time
+import uuid
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 import zipfile
 
+from wdt.toc.existing_toc_stripper import strip_existing_toc
 from wdt.toc.heading_detector import Heading, detect_headings
 from wdt.toc.page_calculator import PageMode, compute_pages
+from wdt.toc.page_measurer import build_heading_anchor_xml, build_sentinel_xml
 from wdt.toc.styles_templates import HYPERLINK_STYLE_ID, TocStyle, toc_styles_fragment
 from wdt.toc.zip_rewriter import rewrite_zip
 
@@ -46,6 +49,79 @@ class TocReport:
     pages: list[int]
     backup_path: Path | None
     elapsed: float
+    bookmark_names: list[str] = field(default_factory=list)
+    heading_texts: list[str] = field(default_factory=list)
+    sentinel: str = ""
+
+
+@dataclass
+class BodyFont:
+    ascii: str | None = None
+    hAnsi: str | None = None
+    eastAsia: str | None = None
+
+
+def detect_body_font(styles_xml: str | bytes) -> BodyFont | None:
+    """从 styles.xml 探测正文字体（优先级：docDefaults -> Normal 样式）。"""
+    if not styles_xml:
+        return None
+    xml_str = styles_xml.decode("utf-8", errors="replace") if isinstance(styles_xml, bytes) else styles_xml
+    try:
+        root = ET.fromstring(xml_str)
+    except Exception:
+        return None
+
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+
+    # 1. docDefaults -> rPrDefault -> rPr -> rFonts
+    rfonts_def = root.find(".//w:docDefaults/w:rPrDefault/w:rPr/w:rFonts", ns)
+    if rfonts_def is not None:
+        ascii_f = rfonts_def.attrib.get(f"{{{ns['w']}}}ascii")
+        hansi_f = rfonts_def.attrib.get(f"{{{ns['w']}}}hAnsi")
+        eastasia_f = rfonts_def.attrib.get(f"{{{ns['w']}}}eastAsia")
+        if ascii_f or hansi_f or eastasia_f:
+            return BodyFont(ascii=ascii_f, hAnsi=hansi_f, eastAsia=eastasia_f)
+
+    # 2. Normal 样式 (styleId="Normal" 或 w:default="1" 且 w:type="paragraph")
+    for style in root.findall(".//w:style", ns):
+        stype = style.attrib.get(f"{{{ns['w']}}}type")
+        sid = style.attrib.get(f"{{{ns['w']}}}styleId", "")
+        is_default = style.attrib.get(f"{{{ns['w']}}}default") == "1"
+        if stype == "paragraph" and (sid == "Normal" or is_default):
+            rfonts_norm = style.find("./w:rPr/w:rFonts", ns)
+            if rfonts_norm is not None:
+                ascii_f = rfonts_norm.attrib.get(f"{{{ns['w']}}}ascii")
+                hansi_f = rfonts_norm.attrib.get(f"{{{ns['w']}}}hAnsi")
+                eastasia_f = rfonts_norm.attrib.get(f"{{{ns['w']}}}eastAsia")
+                if ascii_f or hansi_f or eastasia_f:
+                    return BodyFont(ascii=ascii_f, hAnsi=hansi_f, eastAsia=eastasia_f)
+
+    return None
+
+
+_RFONTS_TAGS = re.compile(r"<w:rFonts\b[^>]*/>")
+
+def _dominant_font_attrs(doc_bytes: bytes) -> dict[str, str]:
+    """统计正文 run 中 rFonts 各字体属性的频次众数。
+
+    LO 转换文档的 docDefaults 常与正文实际字体不一致（正文由 run 级直接格式决定），
+    以正文众数字体为准可使目录与正文视觉统一。
+    """
+    xml = doc_bytes.decode("utf-8", errors="ignore")
+    counts: dict[str, dict[str, int]] = {"ascii": {}, "hAnsi": {}, "eastAsia": {}}
+    for tag in _RFONTS_TAGS.findall(xml):
+        for attr, key in (("w:ascii", "ascii"), ("w:hAnsi", "hAnsi"), ("w:eastAsia", "eastAsia")):
+            m = re.search(attr + r'="([^"]+)"', tag)
+            if m:
+                v = m.group(1)
+                counts[key][v] = counts[key].get(v, 0) + 1
+    result: dict[str, str] = {}
+    for key, c in counts.items():
+        if c:
+            top, n = max(c.items(), key=lambda kv: kv[1])
+            if n >= 10:
+                result[key] = top
+    return result
 
 
 class NoHeadingError(ValueError):
@@ -54,7 +130,6 @@ class NoHeadingError(ValueError):
 
 
 # 跨页续表头标记：SAS Listing 每页重复输出带 "(Continued)" / "（续）" 的表头
-# 若原文档将其标记为标题样式，目录生成时应过滤去重
 _CONTINUED_HEADING_RE = re.compile(r"(?i)\(\s*continued\s*\)|（\s*续\s*）|\(\s*续\s*\)")
 
 
@@ -78,6 +153,31 @@ def _find_max_bookmark_id(doc_bytes: bytes) -> int:
     return max(existing_ids) if existing_ids else -1
 
 
+def _parse_sect_geometry(sect_xml: str) -> tuple[int, int, int]:
+    """解析 sectPr 中的页面宽度与左右页边距（dxa）。返回 (width, left_margin, right_margin)。"""
+    width = 11906
+    left = 1440
+    right = 1440
+    m_w = re.search(r'<w:pgSz\b[^>]*?w:w="(\d+)"', sect_xml)
+    if m_w:
+        width = int(m_w.group(1))
+    m_left = re.search(r'<w:pgMar\b[^>]*?w:left="(\d+)"', sect_xml)
+    if m_left:
+        left = int(m_left.group(1))
+    m_right = re.search(r'<w:pgMar\b[^>]*?w:right="(\d+)"', sect_xml)
+    if m_right:
+        right = int(m_right.group(1))
+    return width, left, right
+
+
+def _format_rfonts(default_ascii: str, default_eastasia: str, default_hansi: str, body_font: BodyFont | None) -> str:
+    """结合正文探测字体生成 rFonts 标签"""
+    ascii_f = body_font.ascii if (body_font and body_font.ascii) else default_ascii
+    eastasia_f = body_font.eastAsia if (body_font and body_font.eastAsia) else default_eastasia
+    hansi_f = body_font.hAnsi if (body_font and body_font.hAnsi) else default_hansi
+    return f'<w:rFonts w:ascii="{ascii_f}" w:eastAsia="{eastasia_f}" w:hAnsi="{hansi_f}"/>'
+
+
 def _build_toc_entry_xml(
     index: int,
     total: int,
@@ -86,6 +186,9 @@ def _build_toc_entry_xml(
     page_num: int | None,
     style: TocStyle,
     depth: int,
+    tab_pos: int = 9026,
+    body_font: BodyFont | None = None,
+    is_dynamic: bool = False,
 ) -> str:
     """生成单条 TOC 目录项段落 XML"""
     level = heading.level
@@ -93,15 +196,16 @@ def _build_toc_entry_xml(
 
     # 导线设置
     leader = "none" if style == TocStyle.MINIMAL_CLEAN else "dot"
-    tab_pr = f'<w:tabs><w:tab w:val="right" w:leader="{leader}" w:pos="9305"/></w:tabs>'
+    tab_pr = f'<w:tabs><w:tab w:val="right" w:leader="{leader}" w:pos="{tab_pos}"/></w:tabs>'
 
     # 标题字体与颜色
     if style == TocStyle.MODERN_ACCENT:
+        fonts_xml = _format_rfonts("Calibri", "微软雅黑", "Calibri", body_font)
         if level == 1:
             title_rpr = (
                 '<w:rPr>'
                 f'<w:rStyle w:val="{HYPERLINK_STYLE_ID}"/>'
-                '<w:rFonts w:ascii="Calibri" w:eastAsia="微软雅黑" w:hAnsi="Calibri"/>'
+                f'{fonts_xml}'
                 '<w:b/><w:color w:val="1F4E79"/><w:noProof/>'
                 '</w:rPr>'
             )
@@ -109,75 +213,78 @@ def _build_toc_entry_xml(
             title_rpr = (
                 '<w:rPr>'
                 f'<w:rStyle w:val="{HYPERLINK_STYLE_ID}"/>'
-                '<w:rFonts w:ascii="Calibri" w:eastAsia="微软雅黑" w:hAnsi="Calibri"/>'
+                f'{fonts_xml}'
                 '<w:color w:val="262626"/><w:noProof/>'
                 '</w:rPr>'
             )
     elif style == TocStyle.REGULATORY_LISTING:
+        fonts_xml = _format_rfonts("Times New Roman", "等线", "Times New Roman", body_font)
         title_rpr = (
             '<w:rPr>'
             f'<w:rStyle w:val="{HYPERLINK_STYLE_ID}"/>'
-            '<w:rFonts w:ascii="Times New Roman" w:eastAsia="等线" w:hAnsi="Times New Roman"/>'
+            f'{fonts_xml}'
             '<w:noProof/>'
             '</w:rPr>'
         )
     elif style == TocStyle.CLASSIC_DOT:
+        fonts_xml = _format_rfonts("Times New Roman", "宋体", "Times New Roman", body_font)
         title_rpr = (
             '<w:rPr>'
             f'<w:rStyle w:val="{HYPERLINK_STYLE_ID}"/>'
-            '<w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体" w:hAnsi="Times New Roman"/>'
+            f'{fonts_xml}'
             '<w:noProof/>'
             '</w:rPr>'
         )
     else:  # MINIMAL_CLEAN
+        fonts_xml = _format_rfonts("Arial", "微软雅黑", "Arial", body_font)
         title_rpr = (
             '<w:rPr>'
             f'<w:rStyle w:val="{HYPERLINK_STYLE_ID}"/>'
-            '<w:rFonts w:ascii="Arial" w:eastAsia="微软雅黑" w:hAnsi="Arial"/>'
+            f'{fonts_xml}'
             '<w:color w:val="333333"/><w:noProof/>'
             '</w:rPr>'
         )
 
-    # 页码字体样式（极简模式弱化）
+    # 页码字体样式（支持 body_font 覆盖）
+    page_font_frag = _format_rfonts("Times New Roman", "宋体", "Times New Roman", body_font) if body_font else ""
     if style == TocStyle.MINIMAL_CLEAN:
-        page_rpr = '<w:rPr><w:sz w:val="18"/><w:szCs w:val="18"/><w:color w:val="7F7F7F"/><w:noProof/></w:rPr>'
+        page_rpr = f'<w:rPr>{page_font_frag}<w:sz w:val="18"/><w:szCs w:val="18"/><w:color w:val="7F7F7F"/><w:noProof/></w:rPr>'
     else:
-        page_rpr = '<w:rPr><w:noProof/></w:rPr>'
+        page_rpr = f'<w:rPr>{page_font_frag}<w:noProof/></w:rPr>'
 
     page_str = str(page_num) if page_num is not None else ""
 
-    hyperlink_block = (
-        f'<w:hyperlink w:anchor="{bm_name}" w:history="1">'
-        f'<w:r>{title_rpr}<w:t xml:space="preserve">{escaped_title}</w:t></w:r>'
-        f'<w:r><w:rPr><w:noProof/><w:webHidden/></w:rPr><w:tab/></w:r>'
-        f'<w:r><w:rPr><w:noProof/><w:webHidden/></w:rPr><w:fldChar w:fldCharType="begin"/></w:r>'
-        f'<w:r><w:rPr><w:noProof/><w:webHidden/></w:rPr><w:instrText xml:space="preserve"> PAGEREF {bm_name} </w:instrText></w:r>'
-        f'<w:r><w:rPr><w:noProof/><w:webHidden/></w:rPr><w:instrText>\\</w:instrText></w:r>'
-        f'<w:r><w:rPr><w:noProof/><w:webHidden/></w:rPr><w:instrText xml:space="preserve">h </w:instrText></w:r>'
-        f'<w:r><w:rPr><w:noProof/><w:webHidden/></w:rPr><w:fldChar w:fldCharType="separate"/></w:r>'
-        f'<w:r>{page_rpr}<w:t>{page_str}</w:t></w:r>'
-        f'<w:r><w:rPr><w:noProof/><w:webHidden/></w:rPr><w:fldChar w:fldCharType="end"/></w:r>'
-        f'</w:hyperlink>'
-    )
-
-    if index == 0:
-        # 首个条目包装 TOC 域开始标记
-        p_xml = (
-            f'<w:p>'
-            f'<w:pPr><w:pStyle w:val="TOC{level}"/>{tab_pr}<w:rPr><w:noProof/></w:rPr></w:pPr>'
-            f'<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
-            f'<w:r><w:instrText xml:space="preserve"> TOC \\o "1-{depth}" \\h \\z \\u </w:instrText></w:r>'
-            f'<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
-            f'{hyperlink_block}'
-            f'</w:p>'
+    # 关键排版设计：
+    # 在静态实测模式下，直接生成确凿的纯文本页码，保留超链接跳转，
+    # 彻底杜绝嵌套 PAGEREF 域在 LibreOffice 无头导出 PDF 时被强制重新求值清空的问题！
+    if not is_dynamic:
+        hyperlink_block = (
+            f'<w:hyperlink w:anchor="{bm_name}" w:history="1">'
+            f'<w:r>{title_rpr}<w:t xml:space="preserve">{escaped_title}</w:t></w:r>'
+            f'<w:r><w:tab/></w:r>'
+            f'<w:r>{page_rpr}<w:t>{page_str}</w:t></w:r>'
+            f'</w:hyperlink>'
         )
     else:
-        p_xml = (
-            f'<w:p>'
-            f'<w:pPr><w:pStyle w:val="TOC{level}"/>{tab_pr}<w:rPr><w:noProof/></w:rPr></w:pPr>'
-            f'{hyperlink_block}'
-            f'</w:p>'
+        # 仅在动态域模式下输出 PAGEREF
+        hyperlink_block = (
+            f'<w:hyperlink w:anchor="{bm_name}" w:history="1">'
+            f'<w:r>{title_rpr}<w:t xml:space="preserve">{escaped_title}</w:t></w:r>'
+            f'<w:r><w:tab/></w:r>'
+            f'<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+            f'<w:r><w:instrText xml:space="preserve"> PAGEREF {bm_name} </w:instrText></w:r>'
+            f'<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+            f'<w:r>{page_rpr}<w:t>{page_str}</w:t></w:r>'
+            f'<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+            f'</w:hyperlink>'
         )
+
+    p_xml = (
+        f'<w:p>'
+        f'<w:pPr><w:pStyle w:val="TOC{level}"/>{tab_pr}<w:rPr><w:noProof/></w:rPr></w:pPr>'
+        f'{hyperlink_block}'
+        f'</w:p>'
+    )
 
     return p_xml
 
@@ -224,7 +331,21 @@ def inject_toc(
     except zipfile.BadZipFile as e:
         raise ValueError(f"Invalid docx: bad zip archive: {e}") from e
 
-    # 2. 标题检测与过滤
+    # 2. 先行剥离既有旧目录（含 sdt 块、字段段落与 SAS 模板占位节），后续计算基于干净字节流
+    doc_bytes = strip_existing_toc(doc_bytes, styles_xml)
+
+    # 3. 探测正文字体（docDefaults/Normal 样式），并以正文 run 众数字体修正
+    body_font = detect_body_font(styles_xml)
+    if body_font is not None:
+        dom = _dominant_font_attrs(doc_bytes)
+        if dom:
+            body_font = BodyFont(
+                ascii=dom.get("ascii", body_font.ascii),
+                hAnsi=dom.get("hAnsi", body_font.hAnsi),
+                eastAsia=dom.get("eastAsia", body_font.eastAsia),
+            )
+
+    # 4. 标题检测与过滤
     styles_bytes = styles_xml.encode("utf-8")
     all_headings = detect_headings(doc_bytes, styles_bytes)
     safe_depth = max(1, min(config.depth, 3))
@@ -238,7 +359,7 @@ def inject_toc(
     if not valid_headings:
         raise NoHeadingError(f"未在文档中检测到符合深度 <= {safe_depth} 的标题")
 
-    # 3. 书签避让规划
+    # 5. 书签避让规划
     bm_prefix = _generate_bookmark_prefix(doc_bytes)
     start_bm_id = _find_max_bookmark_id(doc_bytes) + 1
 
@@ -248,7 +369,7 @@ def inject_toc(
         bm_name = f"{bm_prefix}{i + 1:06d}"
         bm_assignments.append((bm_id, bm_name))
 
-    # 4. 插入位置定位
+    # 6. 插入位置定位
     insert_pos: int
     replace_start: int
     replace_end: int
@@ -281,7 +402,7 @@ def inject_toc(
         replace_start = p_empty_center_end
         replace_end = p_ph_end
         insert_pos = replace_start
-        has_own_title = False  # 原模板已有 Table of Contents 标题段落
+        has_own_title = False
 
     elif config.position == Position.BOOKMARK:
         if not config.bookmark_name:
@@ -304,24 +425,56 @@ def inject_toc(
     else:
         raise ValueError(f"Unknown position: {config.position}")
 
-    # 5. 计算物理页码
-    pages = compute_pages(
+    # 7. 分节模板与右制表位绝对计算（取 insert_pos 之后首个 sectPr，无则最后一个）
+    sect_matches = list(re.finditer(rb"<w:sectPr\b.*?</w:sectPr>", doc_bytes, re.DOTALL))
+    target_sect = None
+    if sect_matches:
+        for s in sect_matches:
+            if s.start() >= insert_pos:
+                target_sect = s
+                break
+        if target_sect is None:
+            target_sect = sect_matches[-1]
+
+    if target_sect is not None:
+        raw_sect = target_sect.group(0).decode("utf-8", errors="replace")
+        sect_template = re.sub(r"<w:pgNumType\b[^>]*/>", "", raw_sect)
+    else:
+        sect_template = (
+            '<w:sectPr>'
+            '<w:pgSz w:w="11906" w:h="16838"/>'
+            '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>'
+            '</w:sectPr>'
+        )
+
+    pg_w, pg_left, pg_right = _parse_sect_geometry(sect_template)
+    # 版心宽度，保留 120 dxa (~6pt) 安全边界以防极端字体触顶换行
+    right_tab_pos = max(1000, pg_w - pg_left - pg_right - 120)
+
+    # 8. 计算页码（STATIC_MEASURED 模式先置占位 0，同时准备 break-count 兜底页码）
+    break_count_pages = compute_pages(
         doc_bytes=doc_bytes,
         heading_positions=[h.p_start for h in valid_headings],
         insert_pos=insert_pos,
-        mode=config.page_mode,
+        mode=PageMode.STATIC_RESTART,
         page_offset=config.page_offset,
     )
+    if config.page_mode == PageMode.STATIC_MEASURED:
+        pages = [0] * len(valid_headings)
+    else:
+        pages = break_count_pages
 
-    # 6. 生成 TOC 目录主体 XML
+    # 9. 生成 TOC 目录主体 XML
     toc_xml_parts: list[str] = []
 
     # 目录标题段落
     if has_own_title and config.title:
         escaped_title = html.escape(config.title)
+        title_rfonts = _format_rfonts("Times New Roman", "宋体", "Times New Roman", body_font) if body_font else ""
+        title_rpr_str = f"<w:rPr>{title_rfonts}</w:rPr>" if title_rfonts else ""
         toc_xml_parts.append(
             f'<w:p><w:pPr><w:pStyle w:val="TOC"/></w:pPr>'
-            f'<w:r><w:t>{escaped_title}</w:t></w:r></w:p>'
+            f'<w:r>{title_rpr_str}<w:t>{escaped_title}</w:t></w:r></w:p>'
         )
 
     # 目录项内容
@@ -340,50 +493,41 @@ def inject_toc(
                 page_num=p_num,
                 style=config.style,
                 depth=safe_depth,
+                tab_pos=right_tab_pos,
+                body_font=body_font,
+                is_dynamic=False,
             )
             toc_xml_parts.append(entry_xml)
 
-        # 追加闭合域标记段落
-        p_close_field = (
-            '<w:p><w:pPr><w:rPr><w:noProof/></w:rPr></w:pPr>'
-            '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
-        )
-        toc_xml_parts.append(p_close_field)
-
-    # 7. STATIC_RESTART 分节处理
-    # 提取现有最后一个 sectPr 作为分节模板
-    sect_matches = list(re.finditer(rb"<w:sectPr\b.*?</w:sectPr>", doc_bytes, re.DOTALL))
-    if sect_matches:
-        raw_last_sect = sect_matches[-1].group(0).decode("utf-8", errors="replace")
-        # 清除已有的 pgNumType
-        sect_template = re.sub(r"<w:pgNumType\b[^>]*/>", "", raw_last_sect)
-    else:
-        sect_template = (
-            '<w:sectPr>'
-            '<w:pgSz w:w="11906" w:h="16838"/>'
-            '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>'
-            '</w:sectPr>'
-        )
-
-    # 目录节后追加独立分节符
-    if config.page_mode == PageMode.STATIC_RESTART:
+    # 10. 分节与前哨标记处理
+    # STATIC_RESTART 与 STATIC_MEASURED 均需在目录节后注入独立分节符
+    if config.page_mode in (PageMode.STATIC_RESTART, PageMode.STATIC_MEASURED):
         toc_sect_p = f"<w:p><w:pPr>{sect_template}</w:pPr></w:p>"
         toc_xml_parts.append(toc_sect_p)
 
+    sentinel_uuid = uuid.uuid4().hex[:8]
+    if config.page_mode == PageMode.STATIC_MEASURED:
+        sentinel_p = build_sentinel_xml(sentinel_uuid)
+        toc_xml_parts.append(sentinel_p)
+
     toc_replacement_bytes = "".join(toc_xml_parts).encode("utf-8")
 
-    # 8. 正文标题书签注入与正文 sectPr 改造规划
+    # 11. 正文标题书签/隐藏锚点注入与正文 sectPr 改造规划
     replacements_list: list[tuple[int, int, bytes]] = []
 
     # 目录插入点
     replacements_list.append((replace_start, replace_end, toc_replacement_bytes))
 
-    # 各标题段落书签注入
+    # 各标题段落书签及隐藏锚点注入
     for i, heading in enumerate(valid_headings):
         bm_id, bm_name = bm_assignments[i]
         orig_p_bytes = doc_bytes[heading.p_start : heading.p_end]
 
         bm_start_bytes = f'<w:bookmarkStart w:id="{bm_id}" w:name="{bm_name}"/>'.encode("utf-8")
+        if config.page_mode == PageMode.STATIC_MEASURED:
+            anchor_xml = build_heading_anchor_xml(i)
+            bm_start_bytes = bm_start_bytes + anchor_xml.encode("utf-8")
+
         bm_end_bytes = f'<w:bookmarkEnd w:id="{bm_id}"/>'.encode("utf-8")
 
         if b"</w:pPr>" in orig_p_bytes:
@@ -398,16 +542,7 @@ def inject_toc(
         replacements_list.append((heading.p_start, heading.p_end, new_p_bytes))
 
     # 正文首个分节符添加/修改 pgNumType start="1"
-    if config.page_mode == PageMode.STATIC_RESTART and sect_matches:
-        # 定位 insert_pos 之后的第一个 sectPr（若无则取最后一个）
-        target_sect = None
-        for s in sect_matches:
-            if s.start() >= insert_pos:
-                target_sect = s
-                break
-        if target_sect is None:
-            target_sect = sect_matches[-1]
-
+    if config.page_mode in (PageMode.STATIC_RESTART, PageMode.STATIC_MEASURED) and sect_matches:
         sect_bytes = target_sect.group(0)
         sect_str = sect_bytes.decode("utf-8", errors="replace")
 
@@ -417,10 +552,8 @@ def inject_toc(
                 r'<w:pgNumType\1 w:start="1"/>',
                 sect_str,
             )
-            # 若已有 w:start 则替换其值
             new_sect_str = re.sub(r'w:start="[^"]*"', 'w:start="1"', new_sect_str)
         else:
-            # 插入在 <w:sectPr 开标签后
             m_open = re.match(r"<w:sectPr\b[^>]*>", sect_str)
             assert m_open is not None
             idx = m_open.end()
@@ -430,14 +563,13 @@ def inject_toc(
             (target_sect.start(), target_sect.end(), new_sect_str.encode("utf-8"))
         )
 
-    # 9. 排序并组装新 document.xml
+    # 12. 排序并组装新 document.xml
     replacements_list.sort(key=lambda item: (item[0], item[1]))
 
     chunks: list[bytes] = []
     curr_pos = 0
     for r_start, r_end, r_bytes in replacements_list:
         if r_start < curr_pos:
-            # 兼容重叠区间（如目录插入在标题段落起始处）
             continue
         chunks.append(doc_bytes[curr_pos:r_start])
         chunks.append(r_bytes)
@@ -445,7 +577,7 @@ def inject_toc(
     chunks.append(doc_bytes[curr_pos:])
     new_doc_bytes = b"".join(chunks)
 
-    # 10. 处理 styles.xml 注入（按样式 ID 逐个补缺，不重复注入已有样式）
+    # 13. 处理 styles.xml 注入
     style_frag = toc_styles_fragment(
         config.style, safe_depth, existing_styles_xml=styles_xml
     )
@@ -454,7 +586,7 @@ def inject_toc(
     else:
         new_styles_xml = styles_xml
 
-    # 11. 处理 settings.xml updateFields
+    # 14. 处理 settings.xml updateFields
     if config.page_mode == PageMode.DYNAMIC:
         if "<w:updateFields" in settings_xml:
             new_settings_xml = re.sub(
@@ -478,7 +610,7 @@ def inject_toc(
         new_settings_xml = new_settings_xml.replace('<w:updateFields w:val="1"/>', '')
         new_settings_xml = new_settings_xml.replace('<w:updateFields/>', '')
 
-    # 12. 备份原文件
+    # 15. 备份原文件
     backup_path = None
     if config.backup:
         potential_backup = docx_path.with_name(docx_path.name + ".bak")
@@ -486,7 +618,7 @@ def inject_toc(
             shutil.copy2(docx_path, potential_backup)
             backup_path = potential_backup
 
-    # 13. 原子写回
+    # 16. 原子写回
     rewrite_zip(
         docx_path=docx_path,
         replacements={
@@ -500,7 +632,10 @@ def inject_toc(
     elapsed = time.time() - t0
     return TocReport(
         entries=len(valid_headings),
-        pages=pages,
+        pages=break_count_pages if config.page_mode == PageMode.STATIC_MEASURED else pages,
         backup_path=backup_path,
         elapsed=elapsed,
+        bookmark_names=[bm_name for _, bm_name in bm_assignments],
+        heading_texts=[h.text for h in valid_headings],
+        sentinel=sentinel_uuid if config.page_mode == PageMode.STATIC_MEASURED else "",
     )

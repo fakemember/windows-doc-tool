@@ -98,11 +98,19 @@ def test_modern_accent_highlight():
 
 
 def test_regulatory_listing_fonts():
-    """验证 Regulatory 样式的字体与大标题颜色 2F5496"""
+    """验证 Regulatory 样式的字体与黑色大标题"""
     fragment = toc_styles_fragment(TocStyle.REGULATORY_LISTING, depth=1)
     root = ET.fromstring(f'<w:styles xmlns:w="{W_NS}">{fragment}</w:styles>')
 
     s_heading = root.find("./w:style[@w:styleId='TOC']", NS)
     color_h = s_heading.find("./w:rPr/w:color", NS)
     assert color_h is not None
-    assert color_h.attrib.get(f"{{{W_NS}}}val") == "2F5496"
+    assert color_h.attrib.get(f"{{{W_NS}}}val") == "000000"
+    sz_h = s_heading.find("./w:rPr/w:sz", NS)
+    assert sz_h is not None
+    assert sz_h.attrib.get(f"{{{W_NS}}}val") == "20"
+
+    s_toc1 = root.find("./w:style[@w:styleId='TOC1']", NS)
+    sz_1 = s_toc1.find("./w:rPr/w:sz", NS)
+    assert sz_1 is not None
+    assert sz_1.attrib.get(f"{{{W_NS}}}val") == "20"

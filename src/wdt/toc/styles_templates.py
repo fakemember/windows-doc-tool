@@ -15,7 +15,7 @@ HYPERLINK_STYLE_ID = "WDTocHyperlink"
 class TocStyle(Enum):
     CLASSIC_DOT = "classic"          # 传统点导线样式（宋体/Times，五号字）
     MODERN_ACCENT = "modern"         # 现代商务（微软雅黑/Calibri，一级标题加粗 #1F4E79）
-    REGULATORY_LISTING = "regulatory"# 临床 Listing 规范样式（10.5pt 等线/Times）
+    REGULATORY_LISTING = "regulatory"# 临床 Listing 规范样式（10pt 宋体/Times）
     MINIMAL_CLEAN = "minimal"        # 极简无导线，空白隔离，页码弱化
 
 
@@ -30,13 +30,15 @@ def _toc_heading_style(style: TocStyle) -> str:
         color = '<w:color w:val="1F4E79"/>'
         bold = '<w:b/><w:bCs/>'
     elif style == TocStyle.REGULATORY_LISTING:
-        rfonts = '<w:rFonts w:ascii="等线 Light" w:eastAsia="等线 Light" w:hAnsi="等线 Light"/>'
-        color = '<w:color w:val="2F5496"/>'
-        bold = '<w:b w:val="0"/><w:bCs w:val="0"/>'
+        rfonts = '<w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体" w:hAnsi="Times New Roman" w:cs="Times New Roman"/>'
+        color = '<w:color w:val="000000"/>'
+        bold = '<w:b/><w:bCs/>'
     else:  # MINIMAL_CLEAN
         rfonts = '<w:rFonts w:ascii="Arial" w:eastAsia="微软雅黑" w:hAnsi="Arial" w:cs="Arial"/>'
         color = '<w:color w:val="333333"/>'
         bold = '<w:b/><w:bCs/>'
+
+    sz = "20" if style == TocStyle.REGULATORY_LISTING else "32"
 
     return (
         f'<w:style w:type="paragraph" w:styleId="TOC">'
@@ -53,7 +55,7 @@ def _toc_heading_style(style: TocStyle) -> str:
         f'{rfonts}'
         f'{bold}'
         f'{color}'
-        f'<w:sz w:val="32"/><w:szCs w:val="32"/>'
+        f'<w:sz w:val="{sz}"/><w:szCs w:val="{sz}"/>'
         f'</w:rPr>'
         f'</w:style>'
     )
@@ -83,8 +85,8 @@ def _toc_level_style(style: TocStyle, level: int) -> str:
         color = '<w:color w:val="1F4E79"/>' if level == 1 else '<w:color w:val="262626"/>'
         r_pr = f'<w:rPr>{rfonts}{bold}{color}<w:sz w:val="{sz}"/><w:szCs w:val="{sz}"/></w:rPr>'
     elif style == TocStyle.REGULATORY_LISTING:
-        rfonts = '<w:rFonts w:ascii="Times New Roman" w:eastAsia="等线" w:hAnsi="Times New Roman" w:cs="Times New Roman"/>'
-        sz = "21"
+        rfonts = '<w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体" w:hAnsi="Times New Roman" w:cs="Times New Roman"/>'
+        sz = "20"
         r_pr = f'<w:rPr>{rfonts}<w:sz w:val="{sz}"/><w:szCs w:val="{sz}"/></w:rPr>'
     else:  # MINIMAL_CLEAN
         rfonts = '<w:rFonts w:ascii="Arial" w:eastAsia="微软雅黑" w:hAnsi="Arial" w:cs="Arial"/>'
