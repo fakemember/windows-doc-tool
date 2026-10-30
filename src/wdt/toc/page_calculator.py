@@ -1,6 +1,6 @@
 """
 页码计算器：基于 bisect 二分查找高效计算各标题在 Word 中的物理页码。
-支持分节重启（STATIC_RESTART）、页数偏移（STATIC_OFFSET）、原位替换（STATIC_IN_PLACE）与动态域（DYNAMIC）四种模式。
+支持分节重启（STATIC_RESTART）、页数偏移（STATIC_OFFSET）、原位替换（STATIC_IN_PLACE）、实测页码（STATIC_MEASURED）与动态域（DYNAMIC）五种模式。
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ class PageMode(Enum):
     STATIC_RESTART = "static-restart"      # 分节页码重启（默认）
     STATIC_OFFSET = "static-offset"        # 估算目录页数偏移补偿
     STATIC_IN_PLACE = "static-in-place"    # 仅 REPLACE_PLACEHOLDER 用，移植基座公式
+    STATIC_MEASURED = "measured"           # 基于隐藏锚点实测页码
     DYNAMIC = "dynamic"                    # 动态域，页码由 Word 打开时刷新
 
 
@@ -44,10 +45,14 @@ def compute_pages(
     :param insert_pos: 目录插入位置（字节偏移）
     :param mode: 页码计算模式
     :param page_offset: 页码偏移增量（仅用于 STATIC_OFFSET 模式）
-    :return: 对应的页码列表（DYNAMIC 模式返回空列表）
+    :return: 对应的页码列表（DYNAMIC 模式返回空列表，STATIC_MEASURED 模式返回占位 0 列表）
     """
     if mode == PageMode.DYNAMIC:
         return []
+
+    if mode == PageMode.STATIC_MEASURED:
+        # 实测模式在初次注入时统一写占位 0，后续由实测器回写
+        return [0] * len(heading_positions)
 
     # 扫描全文中所有的硬分页符与分节符起始位置
     br_positions = find_all_bytes(b'<w:br w:type="page"/>', doc_bytes)

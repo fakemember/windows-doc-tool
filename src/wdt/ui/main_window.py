@@ -527,10 +527,11 @@ class MainWindow(QMainWindow):
         params_grid.addWidget(self._form_label("页码模式"), 2, 1)
         self.combo_page_mode = QComboBox(self.toc_body_widget)
         self.combo_page_mode.addItems([
-            "重新编页（推荐）",
+            "重新编页（默认）",
             "页码偏移",
             "保留原页码",
             "Word 动态域",
+            "实测页码（精确）",
         ])
         self.combo_page_mode.setToolTip(
             "static-restart / static-offset / static-in-place / dynamic\n"
@@ -837,6 +838,7 @@ class MainWindow(QMainWindow):
             1: PageMode.STATIC_OFFSET,
             2: PageMode.STATIC_IN_PLACE,
             3: PageMode.DYNAMIC,
+            4: PageMode.STATIC_MEASURED,
         }
         page_mode = page_mode_map.get(page_mode_idx, PageMode.STATIC_RESTART)
 

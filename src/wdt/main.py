@@ -141,6 +141,7 @@ def build_toc_config(
         "static-restart": PageMode.STATIC_RESTART,
         "static-offset": PageMode.STATIC_OFFSET,
         "static-in-place": PageMode.STATIC_IN_PLACE,
+        "measured": PageMode.STATIC_MEASURED,
         "dynamic": PageMode.DYNAMIC,
     }
     if page_mode_str not in page_mode_map:
@@ -421,7 +422,14 @@ def cmd_toc(args: argparse.Namespace) -> int:
         elif ev.status == "failed":
             print(f"  {prefix} ✗ 失败: {ev.src.name} - {ev.message}")
 
-    events = run_pipeline(target_files, options, progress_cb=progress_cb)
+    engine = None
+    if args.page_mode == "measured":
+        try:
+            engine = find_engine()
+        except EngineNotFoundError:
+            print("错误: --page-mode measured 实测模式需要可用的 LibreOffice 引擎！", file=sys.stderr)
+            return 1
+    events = run_pipeline(target_files, options, progress_cb=progress_cb, engine=engine)
 
     success_count = sum(1 for e in events if e.status == "ok")
     fail_count = sum(1 for e in events if e.status == "failed")
@@ -604,7 +612,7 @@ def build_parser() -> WdtArgumentParser:
     )
     sub_toc.add_argument(
         "--page-mode",
-        choices=["static-restart", "static-offset", "static-in-place", "dynamic"],
+        choices=["static-restart", "static-offset", "static-in-place", "measured", "dynamic"],
         default="static-restart",
         help="页码计算模式（默认 static-restart）",
     )
@@ -639,9 +647,9 @@ def build_parser() -> WdtArgumentParser:
     )
     sub_run.add_argument(
         "--page-mode",
-        choices=["static-restart", "static-offset", "static-in-place", "dynamic"],
-        default="static-restart",
-        help="页码计算模式（默认 static-restart）",
+        choices=["measured", "static-restart", "static-offset", "static-in-place", "dynamic"],
+        default="measured",
+        help="页码计算模式（默认 measured）",
     )
     sub_run.add_argument("--page-offset", type=int, default=0, help="页码偏移补偿量")
     sub_run.add_argument("--pdf", action="store_true", help="级联生成 PDF")

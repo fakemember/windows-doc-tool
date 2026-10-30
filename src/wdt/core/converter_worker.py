@@ -230,7 +230,7 @@ def default_timeout_sec(files: Sequence[Path]) -> int:
     """
     rtf_doc_mb = sum(_workload_mb(f) for f in files if sniff(f) != "docx")
     docx_mb = sum(_workload_mb(f) for f in files if sniff(f) == "docx")
-    return int(300 + 20 * rtf_doc_mb + 2 * docx_mb)
+    return int(600 + 60 * rtf_doc_mb + 3 * docx_mb)
 
 
 def convert_chunk(
