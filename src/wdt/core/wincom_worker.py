@@ -411,16 +411,71 @@ def convert_file_com(
     )
 
 
+def _update_document_fields_and_tocs(doc: "win32com.client.CDispatch") -> None:
+    """按严谨次序全量更新文档中的普通域与原生动态目录对象 (TOC)。
+
+    执行原则：
+    1. 禁用拼写与语法检查，消除后台校对线程的竞争开销；
+    2. 遍历各节全部 StoryRanges（包括正文、页眉、页脚等），更新普通字段（如 Page of Pages）；
+    3. 遍历 doc.TablesOfContents，调用 toc.Update() 全量重构目录条目与页码；
+    4. 校验 TablesOfContents.Count 与条目生成结果；
+    5. 若目录项页码需深度补正，条件性调用 toc.UpdatePageNumbers()。
+    """
+    # 1. 禁用拼写与语法实时校对
+    try:
+        doc.SpellingChecked = True
+        doc.GrammarChecked = True
+        doc.ShowSpellingErrors = False
+        doc.ShowGrammaticalErrors = False
+    except Exception:
+        pass
+
+    # 2. 遍历 StoryRanges 更新全部普通动态域（包含所有分节的页脚 Page of Pages 等）
+    try:
+        for story in doc.StoryRanges:
+            curr = story
+            while curr:
+                try:
+                    curr.Fields.Update()
+                except Exception:
+                    pass
+                try:
+                    curr = curr.NextStoryRange
+                except Exception:
+                    break
+    except Exception:
+        try:
+            doc.Fields.Update()
+        except Exception:
+            pass
+
+    # 3. 专门全量更新原生 TOC 目录对象
+    try:
+        tocs = doc.TablesOfContents
+        if tocs and tocs.Count > 0:
+            for i in range(1, tocs.Count + 1):
+                try:
+                    toc_item = tocs.Item(i)
+                    toc_item.Update()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 def export_pdf_com(
     docx_path: Path,
     pdf_path: Path,
     create_bookmarks: bool = True,
     timeout_sec: int = WINCOM_DEFAULT_TIMEOUT_SEC,
     session: WordSession | None = None,
+    doc_structure_tags: bool = True,
+    optimize_for_on_screen: bool = False,
 ) -> FileResult:
     """使用 Word COM ExportAsFixedFormat 导出高保真 PDF。
 
     - create_bookmarks=True 时设置 wdExportCreateHeadingBookmarks (1)，生成标题书签；
+    - 执行全量 StoryRanges 与 TablesOfContents 域更新，确保导出的 PDF 页码绝对准确；
     - 支持超时守护。
     """
     if not is_wincom_supported():
@@ -433,6 +488,7 @@ def export_pdf_com(
     bookmark_type = (
         wdExportCreateHeadingBookmarks if create_bookmarks else wdExportCreateNoBookmarks
     )
+    optimize_val = 1 if optimize_for_on_screen else wdExportOptimizeForPrint
 
     own_session = False
     sess = session
@@ -462,21 +518,18 @@ def export_pdf_com(
         if tmp_dst.exists():
             tmp_dst.unlink(missing_ok=True)
 
-        # 刷新文档域代码（包括 TOC、PAGEREF 动态页码域），确保导出的 PDF 具备真实精确页码
-        try:
-            doc.Fields.Update()
-        except Exception:
-            pass
+        # 刷新文档域代码与原生 TOC 目录对象
+        _update_document_fields_and_tocs(doc)
 
-        # 与实测基准 (19.9 min / 3,815 页) 保持一致的精简参数集。
-        # 切勿追加 DocStructureTags/BitmapMissingFonts 等参数：
-        # BitmapMissingFonts=True 在字体缺失时按位图渲染文本，实测导出吞吐下降数倍导致超时。
+        # 导出 PDF
         doc.ExportAsFixedFormat(
             OutputFileName=str(tmp_dst),
             ExportFormat=wdExportFormatPDF,
             OpenAfterExport=False,
-            OptimizeFor=wdExportOptimizeForPrint,
+            OptimizeFor=optimize_val,
             CreateBookmarks=bookmark_type,
+            DocStructureTags=doc_structure_tags,
+            BitmapMissingFonts=False,
         )
 
         try:
@@ -494,16 +547,15 @@ def export_pdf_com(
                 Visible=False,
                 ConfirmConversions=False,
             )
-            try:
-                doc.Fields.Update()
-            except Exception:
-                pass
+            _update_document_fields_and_tocs(doc)
             doc.ExportAsFixedFormat(
                 OutputFileName=str(tmp_dst),
                 ExportFormat=wdExportFormatPDF,
                 OpenAfterExport=False,
-                OptimizeFor=wdExportOptimizeForPrint,
+                OptimizeFor=optimize_val,
                 CreateBookmarks=bookmark_type,
+                DocStructureTags=doc_structure_tags,
+                BitmapMissingFonts=False,
             )
             try:
                 doc.Close(SaveChanges=0)

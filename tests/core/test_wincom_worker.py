@@ -203,6 +203,12 @@ def test_export_pdf_com_parameters(tmp_path: Path):
 
     mock_doc.ExportAsFixedFormat.side_effect = fake_export
 
+    story_mock = MagicMock()
+    story_mock.NextStoryRange = None
+    mock_doc.StoryRanges = [story_mock]
+    mock_doc.TablesOfContents = MagicMock()
+    mock_doc.TablesOfContents.Count = 0
+
     session = MagicMock()
     session.is_alive.return_value = True
     session.word = mock_word
@@ -213,7 +219,7 @@ def test_export_pdf_com_parameters(tmp_path: Path):
         assert res.ok is True
         assert res.dst == dst_pdf
         assert dst_pdf.is_file()
-        assert mock_doc.Fields.Update.called  # 验证导出前刷新动态域
+        assert story_mock.Fields.Update.called  # 验证导出前刷新 StoryRanges 动态域
 
         export_call = mock_doc.ExportAsFixedFormat.call_args
         assert export_call.kwargs["ExportFormat"] == wdExportFormatPDF

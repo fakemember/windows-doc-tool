@@ -500,8 +500,9 @@ def inject_toc(
             toc_xml_parts.append(entry_xml)
 
     # 10. 分节与前哨标记处理
-    # STATIC_RESTART 与 STATIC_MEASURED 均需在目录节后注入独立分节符
-    if config.page_mode in (PageMode.STATIC_RESTART, PageMode.STATIC_MEASURED):
+    # STATIC_RESTART、STATIC_MEASURED 与 DYNAMIC 均需在目录节后注入独立分节符，
+    # 保证正文从第 1 页开始重启编号
+    if config.page_mode in (PageMode.STATIC_RESTART, PageMode.STATIC_MEASURED, PageMode.DYNAMIC):
         toc_sect_p = f"<w:p><w:pPr>{sect_template}</w:pPr></w:p>"
         toc_xml_parts.append(toc_sect_p)
 
@@ -542,7 +543,7 @@ def inject_toc(
         replacements_list.append((heading.p_start, heading.p_end, new_p_bytes))
 
     # 正文首个分节符添加/修改 pgNumType start="1"
-    if config.page_mode in (PageMode.STATIC_RESTART, PageMode.STATIC_MEASURED) and sect_matches:
+    if config.page_mode in (PageMode.STATIC_RESTART, PageMode.STATIC_MEASURED, PageMode.DYNAMIC) and sect_matches:
         sect_bytes = target_sect.group(0)
         sect_str = sect_bytes.decode("utf-8", errors="replace")
 
