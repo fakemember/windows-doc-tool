@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "wdt"
 version = "0.1.0"
-description = "Windows batch document converter with styled TOC injection (bundled LibreOffice runtime, no COM)"
+description = "Windows batch document converter with native dynamic TOC injection (pure Microsoft Word COM engine)"
 requires-python = ">=3.10"
 dependencies = [
     "pypdf>=4.0",
