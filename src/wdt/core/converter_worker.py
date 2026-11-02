@@ -224,9 +224,8 @@ def default_timeout_sec(files: Sequence[Path]) -> int:
     """按处理量与源格式估算转换超时。
 
     基准实测：含高密表格的 SAS Listing（3,740 页、100,000 行表格）排版
-    开销约 13.5~18 s/MiB（rtf/doc 源按磁盘体积计）；docx 源按解压后
-    document.xml 体积计约 1.35 s/MiB。统一取 20 s/MiB（rtf/doc）与
-    2 s/MiB（docx）留余量，保底 300s。
+    开销在 CPU 竞争时波动较大。为留足安全余量，取 60 s/MiB（rtf/doc 源按
+    磁盘体积计）与 3 s/MiB（docx 源按解压后 document.xml 体积计），保底 600s。
     """
     rtf_doc_mb = sum(_workload_mb(f) for f in files if sniff(f) != "docx")
     docx_mb = sum(_workload_mb(f) for f in files if sniff(f) == "docx")
