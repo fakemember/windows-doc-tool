@@ -16,14 +16,21 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Literal, Sequence
+from typing import Callable, Literal, Protocol, Sequence
 
 from pypdf import PdfReader, PdfWriter
 
 from wdt.core.batch_runner import BatchRunner
 from wdt.core.converter_worker import FileResult
 from wdt.core.docx_normalizer import normalize_docx
-from wdt.core.engine_finder import Engine, EngineNotFoundError, find_engine
+from wdt.core.engine_finder import (
+    Engine,
+    EngineNotFoundError,
+    arbitrate_engine,
+    find_engine,
+)
+from wdt.core.format_sniffer import sniff
+from wdt.core.wincom_worker import WincomRunner, is_wincom_supported
 from wdt.toc.docx_stream_patcher import (
     NoHeadingError,
     TocConfig,
@@ -39,6 +46,71 @@ from wdt.toc.page_measurer import (
 from wdt.toc.zip_rewriter import _find_seven_zip
 
 logger = logging.getLogger(__name__)
+
+
+EngineKind = Literal["libreoffice", "wincom"]
+
+_ENGINE_LABELS: dict[EngineKind, str] = {
+    "libreoffice": "LibreOffice",
+    "wincom": "Word COM",
+}
+
+
+class ConvertRunner(Protocol):
+    """BatchRunner / WincomRunner 统一调度契约。"""
+
+    def convert(
+        self,
+        pairs: Sequence[tuple[Path, Path]],
+        target: Literal["docx", "pdf"],
+        gray: bool = False,
+        progress_cb: Callable[[int, int, FileResult], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> list[FileResult]: ...
+
+
+def _arbitrate_make_pdf(options: "PipelineOptions") -> bool:
+    """仲裁视角下"任务是否含 PDF 导出"：toc 模式的 measured 实测即一次 PDF 导出。"""
+    if options.mode in ("convert", "run"):
+        return options.make_pdf
+    return bool(options.toc and options.toc.page_mode == PageMode.STATIC_MEASURED)
+
+
+def _resolve_engine_kinds(
+    files: Sequence[Path],
+    options: "PipelineOptions",
+    word_available: bool,
+) -> dict[Path, EngineKind]:
+    """按 engine_mode 为每个源文件决议转换引擎（auto 走量化仲裁 + 规则 C 批次一致性）。"""
+    if options.engine_mode == "libreoffice":
+        return {src: "libreoffice" for src in files}
+    if options.engine_mode == "wincom":
+        if not is_wincom_supported():
+            raise ValueError(
+                "已指定 wincom 引擎，但当前环境不支持 Word COM"
+                "（需 Windows 且安装 Microsoft Word 与 pywin32）。"
+            )
+        return {src: "wincom" for src in files}
+
+    make_pdf = _arbitrate_make_pdf(options)
+    kinds: dict[Path, EngineKind] = {}
+    for src in files:
+        try:
+            size = src.stat().st_size
+        except OSError:
+            size = 0
+        kinds[src] = arbitrate_engine(
+            file_bytes=size,
+            sniffed=sniff(src),
+            make_pdf=make_pdf,
+            make_docx=options.make_docx,
+            word_available=word_available,
+        )
+    # 规则 C：任务含 PDF 导出时，批内任一文件仲裁为 wincom 则整批统一升级，
+    # 保证同批次交付物（如 1 Table + 1 Listing）的排版与渲染引擎一致。
+    if make_pdf and any(k == "wincom" for k in kinds.values()):
+        kinds = {src: "wincom" for src in kinds}
+    return kinds
 
 
 class Stage(Enum):
@@ -67,6 +139,7 @@ class PipelineOptions:
     force: bool = False
     pages: tuple[int, int] | None = None  # 仅单文件 PDF 截取
     base_dir: Path | None = None  # 递归源基准目录，用于镜像相对路径
+    engine_mode: Literal["auto", "libreoffice", "wincom"] = "auto"  # 双引擎仲裁模式
 
 
 def slice_pdf(src_pdf: Path, dst_pdf: Path, page_start: int, page_end: int) -> None:
@@ -117,7 +190,7 @@ def _perform_page_measurement(
     docx_file: Path,
     report: TocReport,
     config: TocConfig,
-    runner: BatchRunner,
+    runner: ConvertRunner,
     seven_zip_path: Path | None = None,
 ) -> tuple[bool, list[int], str]:
     """执行 measured 模式的两遍测量与回写。
@@ -208,14 +281,18 @@ def run_pipeline(
     if options.mode == "convert" and not options.make_docx and not options.make_pdf:
         raise ValueError("convert 模式必须至少启用 make_docx 或 make_pdf 之一")
 
-    # 2. 转换引擎准备
+    # 2. 双引擎决议与准备
     needs_engine = options.mode in ("convert", "run") or (
         options.mode == "toc"
         and options.toc is not None
         and options.toc.page_mode == PageMode.STATIC_MEASURED
     )
-    if needs_engine and engine is None:
-        engine = find_engine()
+    engine_kinds: dict[Path, EngineKind] = {}
+    if needs_engine:
+        # 入口一次性按文件决议引擎，convert / 测量 / pdf 各阶段共用（全生命周期绑定）
+        engine_kinds = _resolve_engine_kinds(files, options, is_wincom_supported())
+        if any(k == "libreoffice" for k in engine_kinds.values()) and engine is None:
+            engine = find_engine()
 
     events: list[PipelineEvent] = []
 
@@ -235,14 +312,31 @@ def run_pipeline(
     # 3. 辅助组件
     sz_cmd = _find_seven_zip()
     seven_zip_path = Path(sz_cmd) if sz_cmd else None
-    runner = BatchRunner(engine=engine, jobs=options.jobs) if engine else None
+    lo_runner: BatchRunner | None = (
+        BatchRunner(engine=engine, jobs=options.jobs) if engine else None
+    )
+    com_runner: WincomRunner | None = None
+
+    def get_runner(kind: EngineKind) -> ConvertRunner:
+        nonlocal com_runner
+        if kind == "libreoffice":
+            if lo_runner is None:
+                raise EngineNotFoundError(
+                    "任务包含路由至 LibreOffice 的文件，但未找到可用的 soffice 转换引擎。"
+                )
+            return lo_runner
+        if com_runner is None:
+            com_runner = WincomRunner()
+        return com_runner
+
+    def kind_of(src: Path) -> EngineKind:
+        # 未参与决议的文件（如 toc 非 measured 模式）默认 libreoffice
+        return engine_kinds.get(src, "libreoffice")
 
     # -------------------------------------------------------------------------
     # 模式 A: 仅批量转换 (convert)
     # -------------------------------------------------------------------------
     if options.mode == "convert":
-        assert runner is not None
-
         # 单文件页码截取特殊分支
         if options.pages is not None:
             if len(files) != 1:
@@ -264,12 +358,13 @@ def run_pipeline(
                 return events
 
             t0 = time.time()
+            kind = kind_of(src)
             with tempfile.TemporaryDirectory(prefix="wdt_pages_") as tmp_dir:
                 temp_pdf = Path(tmp_dir) / f"{src.stem}.pdf"
-                results = runner.convert(
+                results = get_runner(kind).convert(
                     [(src, temp_pdf)],
                     target="pdf",
-                    gray=options.gray,
+                    gray=options.gray if kind == "libreoffice" else False,
                     should_cancel=should_cancel,
                 )
                 if is_cancelled() or (results and results[0].error == "cancelled"):
@@ -320,30 +415,45 @@ def run_pipeline(
 
             use_gray = options.gray if cur_target == "pdf" else False
 
-            def _on_progress(done: int, total: int, res: FileResult) -> None:
-                st = (
-                    "ok"
-                    if res.ok
-                    else ("cancelled" if res.error == "cancelled" else "failed")
-                )
-                emit(
-                    stage,
-                    res.src,
-                    st,
-                    f"{res.elapsed:.2f}s" if res.ok else res.error,
-                )
+            # 按决议引擎分组调度（LibreOffice 走多进程并发，Word COM 走串行实例队列）
+            groups: dict[EngineKind, list[tuple[Path, Path]]] = {
+                "libreoffice": [],
+                "wincom": [],
+            }
+            for pair in work_pairs:
+                groups[kind_of(pair[0])].append(pair)
 
-            convert_results = runner.convert(
-                work_pairs,
-                target=cur_target,  # type: ignore[arg-type]
-                gray=use_gray,
-                progress_cb=_on_progress,
-                should_cancel=should_cancel,
-            )
-            if cur_target == "docx":
-                for r in convert_results or []:
-                    if r.ok and r.dst is not None:
-                        _safe_normalize_converted(r.dst, seven_zip_path)
+            for kind, group_pairs in groups.items():
+                if not group_pairs:
+                    continue
+                label = _ENGINE_LABELS[kind]
+
+                def _on_progress(
+                    done: int, total: int, res: FileResult, _label: str = label
+                ) -> None:
+                    st = (
+                        "ok"
+                        if res.ok
+                        else ("cancelled" if res.error == "cancelled" else "failed")
+                    )
+                    msg = (
+                        f"[{_label}] {res.elapsed:.2f}s"
+                        if res.ok
+                        else f"[{_label}] {res.error}"
+                    )
+                    emit(stage, res.src, st, msg)
+
+                convert_results = get_runner(kind).convert(
+                    group_pairs,
+                    target=cur_target,  # type: ignore[arg-type]
+                    gray=use_gray if kind == "libreoffice" else False,
+                    progress_cb=_on_progress,
+                    should_cancel=should_cancel,
+                )
+                if cur_target == "docx" and kind == "libreoffice":
+                    for r in convert_results or []:
+                        if r.ok and r.dst is not None:
+                            _safe_normalize_converted(r.dst, seven_zip_path)
 
         return events
 
@@ -368,9 +478,10 @@ def run_pipeline(
 
                 measure_msg = ""
                 if options.toc.page_mode == PageMode.STATIC_MEASURED:
-                    assert runner is not None
+                    # 测量引擎与该文件最终渲染引擎严格一致（全生命周期绑定）
+                    measure_runner = get_runner(kind_of(src))
                     succ, final_pages, measure_msg = _perform_page_measurement(
-                        src, report, options.toc, runner, seven_zip_path=seven_zip_path
+                        src, report, options.toc, measure_runner, seven_zip_path=seven_zip_path
                     )
                     report.pages = final_pages
 
@@ -394,7 +505,6 @@ def run_pipeline(
     # 模式 C: 端到端一体化流水线 (run)
     # -------------------------------------------------------------------------
     if options.mode == "run":
-        assert runner is not None
         assert options.toc is not None
 
         to_convert: list[tuple[Path, Path]] = []
@@ -431,29 +541,45 @@ def run_pipeline(
                     ready_docxs.append((src, src))
 
         if to_convert and not is_cancelled():
-            def _on_docx_progress(done: int, total: int, res: FileResult) -> None:
-                st = (
-                    "ok"
-                    if res.ok
-                    else ("cancelled" if res.error == "cancelled" else "failed")
-                )
-                emit(
-                    Stage.CONVERT,
-                    res.src,
-                    st,
-                    f"{res.elapsed:.2f}s" if res.ok else res.error,
-                )
+            conv_groups: dict[EngineKind, list[tuple[Path, Path]]] = {
+                "libreoffice": [],
+                "wincom": [],
+            }
+            for pair in to_convert:
+                conv_groups[kind_of(pair[0])].append(pair)
 
-            c_results = runner.convert(
-                to_convert,
-                target="docx",
-                progress_cb=_on_docx_progress,
-                should_cancel=should_cancel,
-            )
-            for r in c_results:
-                if r.ok and r.dst is not None:
-                    _safe_normalize_converted(r.dst, seven_zip_path)
-                    ready_docxs.append((r.src, r.dst))
+            for kind, group_pairs in conv_groups.items():
+                if not group_pairs:
+                    continue
+                label = _ENGINE_LABELS[kind]
+
+                def _on_docx_progress(
+                    done: int, total: int, res: FileResult, _label: str = label
+                ) -> None:
+                    st = (
+                        "ok"
+                        if res.ok
+                        else ("cancelled" if res.error == "cancelled" else "failed")
+                    )
+                    msg = (
+                        f"[{_label}] {res.elapsed:.2f}s"
+                        if res.ok
+                        else f"[{_label}] {res.error}"
+                    )
+                    emit(Stage.CONVERT, res.src, st, msg)
+
+                c_results = get_runner(kind).convert(
+                    group_pairs,
+                    target="docx",
+                    progress_cb=_on_docx_progress,
+                    should_cancel=should_cancel,
+                )
+                for r in c_results:
+                    if r.ok and r.dst is not None:
+                        # wincom 产物为 Word 原生合规 DOCX，跳过 LibreOffice 专用规范化
+                        if kind == "libreoffice":
+                            _safe_normalize_converted(r.dst, seven_zip_path)
+                        ready_docxs.append((r.src, r.dst))
 
         # 阶段 2: 注入 TOC 目录
         injected_docxs: list[tuple[Path, Path]] = []
@@ -467,8 +593,10 @@ def run_pipeline(
 
                 measure_msg = ""
                 if options.toc.page_mode == PageMode.STATIC_MEASURED:
+                    # 测量引擎与该文件最终渲染引擎严格一致（全生命周期绑定）
+                    measure_runner = get_runner(kind_of(orig_src))
                     succ, final_pages, measure_msg = _perform_page_measurement(
-                        d, report, options.toc, runner, seven_zip_path=seven_zip_path
+                        d, report, options.toc, measure_runner, seven_zip_path=seven_zip_path
                     )
                     report.pages = final_pages
 
@@ -498,27 +626,42 @@ def run_pipeline(
                     pair_to_orig[d] = orig_src
 
             if pdf_pairs and not is_cancelled():
-                def _on_pdf_progress(done: int, total: int, res: FileResult) -> None:
-                    orig = pair_to_orig.get(res.src, res.src)
-                    st = (
-                        "ok"
-                        if res.ok
-                        else ("cancelled" if res.error == "cancelled" else "failed")
-                    )
-                    emit(
-                        Stage.PDF,
-                        orig,
-                        st,
-                        f"{res.elapsed:.2f}s" if res.ok else res.error,
-                    )
+                # 按源文件决议的引擎分组导出，与 convert / 测量阶段共用同一引擎
+                pdf_groups: dict[EngineKind, list[tuple[Path, Path]]] = {
+                    "libreoffice": [],
+                    "wincom": [],
+                }
+                for d, dst_pdf in pdf_pairs:
+                    pdf_groups[kind_of(pair_to_orig[d])].append((d, dst_pdf))
 
-                runner.convert(
-                    pdf_pairs,
-                    target="pdf",
-                    gray=options.gray,
-                    progress_cb=_on_pdf_progress,
-                    should_cancel=should_cancel,
-                )
+                for kind, group_pairs in pdf_groups.items():
+                    if not group_pairs:
+                        continue
+                    label = _ENGINE_LABELS[kind]
+
+                    def _on_pdf_progress(
+                        done: int, total: int, res: FileResult, _label: str = label
+                    ) -> None:
+                        orig = pair_to_orig.get(res.src, res.src)
+                        st = (
+                            "ok"
+                            if res.ok
+                            else ("cancelled" if res.error == "cancelled" else "failed")
+                        )
+                        msg = (
+                            f"[{_label}] {res.elapsed:.2f}s"
+                            if res.ok
+                            else f"[{_label}] {res.error}"
+                        )
+                        emit(Stage.PDF, orig, st, msg)
+
+                    get_runner(kind).convert(
+                        group_pairs,
+                        target="pdf",
+                        gray=options.gray if kind == "libreoffice" else False,
+                        progress_cb=_on_pdf_progress,
+                        should_cancel=should_cancel,
+                    )
 
         return events
 

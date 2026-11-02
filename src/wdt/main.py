@@ -17,9 +17,14 @@ import time
 from pathlib import Path
 from typing import Sequence
 
-from wdt import __version__
 from wdt.core.batch_runner import _default_jobs, _get_physical_memory_gb
-from wdt.core.engine_finder import Engine, EngineNotFoundError, find_engine
+from wdt.core.engine_finder import (
+    Engine,
+    EngineNotFoundError,
+    WordEngine,
+    find_engine,
+    find_word_engine,
+)
 from wdt.pipeline import (
     PipelineEvent,
     PipelineOptions,
@@ -72,6 +77,7 @@ def collect_target_files(
     if target.is_dir():
         files: list[Path] = []
         for ext in allowed_exts:
+            pattern = f"*{ext}" if not recursive else f"**/*{ext}"
             files.extend(target.rglob(f"*{ext}") if recursive else target.glob(f"*{ext}"))
         return [
             f.resolve()
@@ -80,6 +86,11 @@ def collect_target_files(
         ]
 
     raise FileNotFoundError(f"目标路径不是合法文件或目录: {target}")
+
+
+def normalize_engine_choice(choice: str) -> str:
+    """归一化 --engine 选项，支持 lo/com 短别名。"""
+    return {"lo": "libreoffice", "com": "wincom"}.get(choice, choice)
 
 
 def parse_pages_arg(pages_str: str) -> tuple[int, int]:
@@ -213,6 +224,8 @@ def cmd_detect(args: argparse.Namespace) -> int:
     except EngineNotFoundError:
         pass
 
+    word_engine: WordEngine = find_word_engine()
+
     sz_cmd = _find_seven_zip()
     cpu_count = os.cpu_count() or 1
     mem_gb = _get_physical_memory_gb()
@@ -222,22 +235,44 @@ def cmd_detect(args: argparse.Namespace) -> int:
     print("Windows Doc Tool (wdt) - 环境诊断")
     print("==================================================")
 
+    print("[转换引擎 - LibreOffice]")
     if engine:
         ver_str = f"{engine.version[0]}.{engine.version[1]}" if engine.version else "未知"
         gray_support = "支持" if (engine.version and engine.version >= (7, 4)) else "不支持 (<7.4)"
-        print("[转换引擎]")
         print("  - 状态: 已就绪")
         print(f"  - 路径: {engine.soffice}")
         print(f"  - 来源: {engine.source}")
         print(f"  - 版本: {ver_str}")
         print(f"  - 原生灰度导出 (>=7.4): {gray_support}")
     else:
-        print("[转换引擎]")
         print("  - 状态: ❌ 未找到可用的 LibreOffice / soffice 转换引擎！")
-        print("[安装提示]")
+        print("[安装提示 - LibreOffice]")
         print("  - Linux:   sudo apt install libreoffice-writer-nogui")
         print("  - macOS:   brew install --cask libreoffice")
         print("  - Windows: 请安装 LibreOffice 或将 portable 运行时放置于 ./runtime/libreoffice")
+
+    print("[转换引擎 - Microsoft Word COM]")
+    if word_engine.available:
+        print("  - 状态: 已就绪")
+        print(f"  - 版本: {word_engine.version or '未知'}")
+        print(f"  - 路径: {word_engine.app_path or '未直接解析出路径 (通过 COM 注册表调度)'}")
+    else:
+        print(f"  - 状态: ❌ 不可用 ({word_engine.error or '未安装或无法通过 COM 自动化'})")
+        if word_engine.version:
+            print(f"  - 检测到的版本: {word_engine.version}")
+        if word_engine.app_path:
+            print(f"  - 路径: {word_engine.app_path}")
+
+    # 推荐引擎说明
+    print("[推荐引擎策略 (auto 模式)]")
+    if engine and word_engine.available:
+        print("  - 双引擎就绪: 中小文件与常规 DOCX 走 LibreOffice 并发；超大文件/PDF 自动切 Word COM")
+    elif engine:
+        print("  - 单引擎模式: 仅 LibreOffice 可用，所有任务均由 LibreOffice 承载")
+    elif word_engine.available:
+        print("  - 单引擎模式: 仅 Word COM 可用，所有转换任务均由 Word 承载 (需支持 wincom 的阶段)")
+    else:
+        print("  - 警告: 无可用转换引擎，请先安装 LibreOffice 或 Microsoft Word")
 
     print("[归档与辅助工具]")
     if sz_cmd:
@@ -288,13 +323,11 @@ def cmd_convert(args: argparse.Namespace) -> int:
     if target_fmt == "docx" and args.gray:
         print("警告: --gray 仅在导出 PDF 时有效，当前目标格式为 docx，已忽略此选项。", file=sys.stderr)
 
-    # 探测 LibreOffice 引擎
+    # 探测 LibreOffice 引擎（纯 wincom 批次可不依赖 LibreOffice，交由流水线二次校验）
     try:
         engine = find_engine()
     except EngineNotFoundError:
-        print("错误: 未找到可用的 LibreOffice / soffice 转换引擎！", file=sys.stderr)
-        print("安装提示：Linux 执行 'sudo apt install libreoffice-writer-nogui'", file=sys.stderr)
-        return 1
+        engine = None
 
     # 收集文件
     try:
@@ -317,6 +350,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         force=args.force,
         pages=pages_range,
         base_dir=target_path if target_path.is_dir() else None,
+        engine_mode=normalize_engine_choice(args.engine),
     )
 
     if pages_range is not None:
@@ -330,7 +364,11 @@ def cmd_convert(args: argparse.Namespace) -> int:
             return 0
         print(f"📄 提取页码转换: {src.name} (页码: {p_start}-{p_end}) → {dst_pdf.name}")
         t0 = time.time()
-        events = run_pipeline(files, options, engine=engine)
+        try:
+            events = run_pipeline(files, options, engine=engine)
+        except (EngineNotFoundError, ValueError) as e:
+            print(f"错误: {e}", file=sys.stderr)
+            return 1
         elapsed = time.time() - t0
         failed = [e for e in events if e.status == "failed"]
         if failed:
@@ -352,8 +390,12 @@ def cmd_convert(args: argparse.Namespace) -> int:
         elif ev.status == "failed":
             print(f"  {prefix} ✗ 失败: {ev.src.name} - {ev.message}")
 
-    print(f"\n🚀 开始转换至 {target_fmt.upper()} 格式（待转换: {len(files)} 个文档）...")
-    events = run_pipeline(files, options, progress_cb=progress_cb, engine=engine)
+    print(f"\n🚀 开始转换至 {target_fmt.upper()} 格式（引擎模式: {options.engine_mode}，待转换: {len(files)} 个文档）...")
+    try:
+        events = run_pipeline(files, options, progress_cb=progress_cb, engine=engine)
+    except (EngineNotFoundError, ValueError) as e:
+        print(f"错误: {e}", file=sys.stderr)
+        return 1
 
     total_success = sum(1 for e in events if e.status == "ok")
     total_failed = sum(1 for e in events if e.status == "failed")
@@ -406,6 +448,7 @@ def cmd_toc(args: argparse.Namespace) -> int:
         mode="toc",
         toc=config,
         jobs=1,
+        engine_mode=normalize_engine_choice(args.engine),
     )
 
     print(f"📑 开始向 {len(target_files)} 个文档注入 TOC 目录 (样式: {args.style}, 深度: {args.depth})...\n")
@@ -427,9 +470,12 @@ def cmd_toc(args: argparse.Namespace) -> int:
         try:
             engine = find_engine()
         except EngineNotFoundError:
-            print("错误: --page-mode measured 实测模式需要可用的 LibreOffice 引擎！", file=sys.stderr)
-            return 1
-    events = run_pipeline(target_files, options, progress_cb=progress_cb, engine=engine)
+            engine = None
+    try:
+        events = run_pipeline(target_files, options, progress_cb=progress_cb, engine=engine)
+    except (EngineNotFoundError, ValueError) as e:
+        print(f"错误: {e}", file=sys.stderr)
+        return 1
 
     success_count = sum(1 for e in events if e.status == "ok")
     fail_count = sum(1 for e in events if e.status == "failed")
@@ -461,8 +507,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     try:
         engine = find_engine()
     except EngineNotFoundError:
-        print("错误: 未找到可用的 LibreOffice / soffice 转换引擎！", file=sys.stderr)
-        return 1
+        engine = None
 
     try:
         files = collect_target_files(target_path, args.recursive, allowed_exts=SUPPORTED_EXTENSIONS)
@@ -498,9 +543,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         jobs=args.jobs,
         force=args.force,
         base_dir=target_path if target_path.is_dir() else None,
+        engine_mode=normalize_engine_choice(args.engine),
     )
 
-    print(f"🔄 启动一体化流水线: 待处理 {len(files)} 个文档 (导出PDF: {args.pdf})...\n")
+    print(f"🔄 启动一体化流水线: 待处理 {len(files)} 个文档 (导出PDF: {args.pdf}, 引擎模式: {options.engine_mode})...\n")
 
     failed_items: list[str] = []
 
@@ -519,7 +565,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         elif ev.status == "skipped":
             print(f"  ⏩ [{stage_name}] 跳过: {ev.src.name} - {ev.message}")
 
-    events = run_pipeline(files, options, progress_cb=progress_cb, engine=engine)
+    try:
+        events = run_pipeline(files, options, progress_cb=progress_cb, engine=engine)
+    except (EngineNotFoundError, ValueError) as e:
+        print(f"错误: {e}", file=sys.stderr)
+        return 1
 
     # 统计独立成功的文件
     unique_failed_srcs = {e.src for e in events if e.status == "failed"}
@@ -565,7 +615,6 @@ def build_parser() -> WdtArgumentParser:
         prog="wdt",
         description="Windows Doc Tool (wdt) - 高性能办公与临床大文件批处理与目录注入工具",
     )
-    parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="subcommand", metavar="COMMAND")
 
     # 1. detect
@@ -587,6 +636,12 @@ def build_parser() -> WdtArgumentParser:
     sub_conv.add_argument("--gray", action="store_true", help="导出灰度 PDF（需要 LO >= 7.4）")
     sub_conv.add_argument("--pages", default=None, help="仅转换指定页码区间 A-B（仅限单文件）")
     sub_conv.add_argument("-f", "--force", action="store_true", help="强制覆盖已存在的目标文件")
+    sub_conv.add_argument(
+        "--engine",
+        choices=["auto", "libreoffice", "wincom", "lo", "com"],
+        default="auto",
+        help="转换与渲染引擎（默认 auto：按文件大小/格式自动仲裁；lo=libreoffice, com=wincom）",
+    )
     sub_conv.set_defaults(func=cmd_convert)
 
     # 3. toc
@@ -619,6 +674,12 @@ def build_parser() -> WdtArgumentParser:
     )
     sub_toc.add_argument("--page-offset", type=int, default=0, help="页码偏移补偿量")
     sub_toc.add_argument("--no-backup", action="store_true", help="就地修改，不保留 .bak 备份文件")
+    sub_toc.add_argument(
+        "--engine",
+        choices=["auto", "libreoffice", "wincom", "lo", "com"],
+        default="auto",
+        help="实测页码测量引擎（默认 auto：按文件大小/格式自动仲裁；lo=libreoffice, com=wincom）",
+    )
     sub_toc.set_defaults(func=cmd_toc)
 
     # 4. run
@@ -656,6 +717,12 @@ def build_parser() -> WdtArgumentParser:
     sub_run.add_argument("--pdf", action="store_true", help="级联生成 PDF")
     sub_run.add_argument("--gray", action="store_true", help="导出的 PDF 为灰度版本")
     sub_run.add_argument("-f", "--force", action="store_true", help="强制覆盖已存在的目标文件")
+    sub_run.add_argument(
+        "--engine",
+        choices=["auto", "libreoffice", "wincom", "lo", "com"],
+        default="auto",
+        help="转换与渲染引擎（默认 auto：按文件大小/格式自动仲裁；lo=libreoffice, com=wincom）",
+    )
     sub_run.set_defaults(func=cmd_run)
 
     # 5. gui
@@ -731,6 +798,3 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stderr.write(f"执行异常: {e}\n")
         return 1
 
-
-if __name__ == "__main__":
-    sys.exit(main())
