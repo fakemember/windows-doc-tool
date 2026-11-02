@@ -130,6 +130,10 @@ def measure_pages_from_pdf(
             if idx not in tag_map and 0 <= idx < heading_count:
                 tag_map[idx] = page_num
 
+        # 性能优化：一旦哨兵与全部标题锚点均已找齐，立即提前退出，避免扫描剩余数千页
+        if sentinel_page is not None and len(tag_map) >= heading_count:
+            break
+
     # 校验哨兵与所有标题锚点
     if sentinel_page is None:
         logger.warning("实测页码告警：未在 PDF 中找到哨兵标记 %s，可能受字体或排版裁剪影响", sentinel_tag)
@@ -217,10 +221,9 @@ def patch_docx_measured_pages(
         doc_xml = pattern.sub(rf"\g<1>{page_num}\g<3>", doc_xml, count=1)
 
     # 2. 清理正文标题中的隐藏锚点 run
-    # 匹配形如 <w:r>...<w:t>WDTTAG\d{4}</w:t></w:r>
+    # 匹配由 build_heading_anchor_xml 精准生成的微型锚点 run（无昂贵 lookahead 回溯）
     anchor_pattern = re.compile(
-        r'<w:r\b[^>]*>(?:(?!</w:r>).)*?<w:t\b[^>]*>WDTTAG\d{4}</w:t>(?:(?!</w:r>).)*?</w:r>',
-        re.DOTALL,
+        r'<w:r\b[^>]*><w:rPr><w:sz w:val="2"/><w:color w:val="FFFFFF"/></w:rPr><w:t>WDTTAG\d{4}</w:t></w:r>'
     )
     doc_xml = anchor_pattern.sub("", doc_xml)
 
