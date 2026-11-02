@@ -12,14 +12,11 @@ import pytest
 from pypdf import PdfReader
 
 from tests.fixtures_factory import build_docx
-from wdt.core.engine_finder import EngineNotFoundError, find_engine
+from wdt.core.engine_finder import EngineNotFoundError, find_word_engine
+from wdt.core.wincom_worker import is_wincom_supported
 from wdt.main import main
 
-try:
-    find_engine()
-    _HAS_SOFFICE = True
-except Exception:
-    _HAS_SOFFICE = False
+_HAS_WORD = is_wincom_supported()
 
 
 def test_main_no_args(capsys):
@@ -35,25 +32,20 @@ def test_detect_cmd(capsys):
     ret = main(["detect"])
     captured = capsys.readouterr()
     assert "Windows Doc Tool (wdt) - 环境诊断" in captured.out
-    if _HAS_SOFFICE:
-        assert ret == 0
-        assert "已就绪" in captured.out
-    else:
-        assert ret == 1
-        assert "未找到可用的 LibreOffice" in captured.out
+    assert "Microsoft Word COM" in captured.out
 
 
 def test_detect_no_engine(monkeypatch, capsys):
-    """测试 detect 在未找到引擎时的错误提示与退出码 1。"""
-    def _mock_find_engine(**kwargs):
-        raise EngineNotFoundError("LibreOffice not found")
+    """测试 detect 在未找到 Word 时的错误提示。"""
+    def _mock_find_word():
+        from wdt.core.engine_finder import WordEngine
+        return WordEngine(available=False, version="", app_path=None, error="Word not found")
 
-    monkeypatch.setattr("wdt.main.find_engine", _mock_find_engine)
+    monkeypatch.setattr("wdt.main.find_word_engine", _mock_find_word)
     ret = main(["detect"])
     assert ret == 1
     captured = capsys.readouterr()
-    assert "未找到可用的 LibreOffice" in captured.out
-    assert "安装提示" in captured.out
+    assert "不可用" in captured.out
 
 
 def test_toc_e2e(tmp_path: Path):
@@ -120,7 +112,7 @@ def test_toc_bookmark_position_and_no_backup(tmp_path: Path):
     assert b"_WDToc" in xml_bytes
 
 
-@pytest.mark.skipif(not _HAS_SOFFICE, reason="系统未安装 soffice")
+@pytest.mark.skipif(not _HAS_WORD, reason="系统未就绪 Word COM 引擎")
 def test_run_pipeline(tmp_path: Path):
     """测试 run 一体化流水线：从 docx 注入目录并导出 PDF。"""
     doc_path = tmp_path / "pipeline_doc.docx"
@@ -150,16 +142,16 @@ def test_run_pipeline(tmp_path: Path):
     assert b"_WDToc" in xml_bytes
 
 
-def test_run_pdf_dynamic_conflict(tmp_path: Path):
-    """测试 run 命令下 --pdf 与 --page-mode dynamic 互斥约束返回非零。"""
-    doc_path = tmp_path / "conflict.docx"
+def test_run_pdf_dynamic_supported(tmp_path: Path):
+    """测试 run 命令下 --pdf 与 --page-mode dynamic 正常协同工作。"""
+    doc_path = tmp_path / "dynamic_doc.docx"
     build_docx(doc_path, paragraphs=[{"text": "H1", "outline": 0, "pstyle": "Heading1"}])
 
     ret = main(["run", str(doc_path), "--pdf", "--page-mode", "dynamic"])
-    assert ret != 0
+    assert ret == 0
 
 
-@pytest.mark.skipif(not _HAS_SOFFICE, reason="系统未安装 soffice")
+@pytest.mark.skipif(not _HAS_WORD, reason="系统未就绪 Word COM 引擎")
 def test_convert_pages_slice(tmp_path: Path):
     """测试 convert --pages 1-1 单文件截取输出 _p1.pdf。"""
     doc_path = tmp_path / "report_pages.docx"
@@ -217,7 +209,7 @@ def test_cli_argument_errors(tmp_path: Path):
     assert ret != 0
 
 
-@pytest.mark.skipif(not _HAS_SOFFICE, reason="系统未安装 soffice")
+@pytest.mark.skipif(not _HAS_WORD, reason="系统未就绪 Word COM 引擎")
 def test_convert_batch_rtf_to_docx(tmp_path: Path):
     """测试 convert 批量转换 RTF 到 DOCX 目录。"""
     sub_in = tmp_path / "inputs"

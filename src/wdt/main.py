@@ -3,6 +3,7 @@ Windows Doc Tool (wdt) CLI 入口。
 
 提供环境诊断 (detect)、批量转换 (convert)、目录注入 (toc)、端到端流水线 (run)
 以及图形交互界面 (gui) 命令行能力。
+纯 Microsoft Word 原生 COM 引擎驱动。
 """
 
 from __future__ import annotations
@@ -17,12 +18,9 @@ import time
 from pathlib import Path
 from typing import Sequence
 
-from wdt.core.batch_runner import _default_jobs, _get_physical_memory_gb
 from wdt.core.engine_finder import (
-    Engine,
     EngineNotFoundError,
     WordEngine,
-    find_engine,
     find_word_engine,
 )
 from wdt.pipeline import (
@@ -88,44 +86,20 @@ def collect_target_files(
     raise FileNotFoundError(f"目标路径不是合法文件或目录: {target}")
 
 
-def normalize_engine_choice(choice: str) -> str:
-    """归一化 --engine 选项，支持 lo/com 短别名。"""
-    return {"lo": "libreoffice", "com": "wincom"}.get(choice, choice)
-
-
 def parse_pages_arg(pages_str: str) -> tuple[int, int]:
     """解析 --pages A-B 参数为 1-based 起止页码。"""
     m = re.match(r"^(\d+)-(\d+)$", pages_str.strip())
     if not m:
         raise ValueError(
-            f"无效的 --pages 格式: '{pages_str}'，应为 'A-B' 形式的正整数区间（例如 1-50）"
+            f"--pages 格式错误: '{pages_str}'，应形如 '1-5' 或 '1-1'"
         )
-    a = int(m.group(1))
-    b = int(m.group(2))
-    if a < 1 or b < 1:
-        raise ValueError(f"页码必须从 1 开始，不能为 0 或负数: {pages_str}")
-    if a > b:
-        raise ValueError(f"起始页码不能大于结束页码: {a} > {b}")
-    return a, b
-
-
-def parse_position(pos_str: str) -> tuple[Position, str | None]:
-    """解析目录插入位置参数，支持 bookmark:NAME 语法。"""
-    pos_str = pos_str.strip()
-    if pos_str.startswith("bookmark:"):
-        bm_name = pos_str[len("bookmark:"):].strip()
-        if not bm_name:
-            raise ValueError("位置参数 bookmark:NAME 中的书签名称不能为空")
-        return Position.BOOKMARK, bm_name
-
-    mapping = {
-        "document-start": Position.DOCUMENT_START,
-        "before-first-heading": Position.BEFORE_FIRST_HEADING,
-        "replace-placeholder": Position.REPLACE_PLACEHOLDER,
-    }
-    if pos_str in mapping:
-        return mapping[pos_str], None
-    raise ValueError(f"不支持的目录插入位置: '{pos_str}'")
+    start = int(m.group(1))
+    end = int(m.group(2))
+    if start <= 0 or end <= 0:
+        raise ValueError("--pages 页码必须为正整数 (>=1)")
+    if start > end:
+        raise ValueError(f"--pages 起始页码 ({start}) 不能大于结束页码 ({end})")
+    return start, end
 
 
 def build_toc_config(
@@ -137,125 +111,111 @@ def build_toc_config(
     page_offset: int,
     backup: bool,
 ) -> TocConfig:
-    """构建 TOC 注入配置对象。"""
+    """解析参数构造 TocConfig 对象。"""
     style_map = {
         "classic": TocStyle.CLASSIC_DOT,
         "modern": TocStyle.MODERN_ACCENT,
         "regulatory": TocStyle.REGULATORY_LISTING,
         "minimal": TocStyle.MINIMAL_CLEAN,
     }
-    if style_str not in style_map:
-        raise ValueError(f"不支持的 TOC 样式: '{style_str}'")
-    style = style_map[style_str]
+    style = style_map.get(style_str, TocStyle.CLASSIC_DOT)
 
-    page_mode_map = {
+    pos_clean = position_str.strip().lower()
+    bookmark_name: str | None = None
+    if pos_clean == "document-start":
+        position = Position.DOCUMENT_START
+    elif pos_clean == "before-first-heading":
+        position = Position.BEFORE_FIRST_HEADING
+    elif pos_clean == "replace-placeholder":
+        position = Position.REPLACE_PLACEHOLDER
+    elif pos_clean.startswith("bookmark:"):
+        position = Position.BOOKMARK
+        bookmark_name = position_str[len("bookmark:"):].strip()
+        if not bookmark_name:
+            raise ValueError("--position bookmark:NAME 必须指定非空书签名称")
+    else:
+        raise ValueError(
+            f"未知的 --position: '{position_str}'，支持 document-start, before-first-heading, replace-placeholder, bookmark:NAME"
+        )
+
+    mode_map = {
         "static-restart": PageMode.STATIC_RESTART,
         "static-offset": PageMode.STATIC_OFFSET,
         "static-in-place": PageMode.STATIC_IN_PLACE,
         "measured": PageMode.STATIC_MEASURED,
         "dynamic": PageMode.DYNAMIC,
     }
-    if page_mode_str not in page_mode_map:
-        raise ValueError(f"不支持的页码模式: '{page_mode_str}'")
-    page_mode = page_mode_map[page_mode_str]
+    page_mode = mode_map.get(page_mode_str, PageMode.STATIC_RESTART)
 
-    position, bm_name = parse_position(position_str)
-    doc_title = title if title is not None else "Table of Contents"
+    if title is None:
+        title_text = "目  录" if style == TocStyle.CLASSIC_DOT else "Table of Contents"
+    else:
+        title_text = title
 
     return TocConfig(
         style=style,
         depth=depth,
-        title=doc_title,
+        title=title_text,
         position=position,
-        bookmark_name=bm_name,
+        bookmark_name=bookmark_name,
         page_mode=page_mode,
         page_offset=page_offset,
         backup=backup,
     )
 
 
-# ---------------------------------------------------------------------------
-# Windows 原生交互与控制台辅助
-# ---------------------------------------------------------------------------
-
-
 def _attach_windows_console() -> bool:
-    """若在 Windows 下通过命令行启动（即使由 windowed 模式构建），附着到父进程控制台以输出日志。"""
+    """在 Windows 子系统为 windows 的可执行程序中尝试附着父进程控制台。"""
     if sys.platform != "win32":
         return False
     try:
         import ctypes
 
-        # ATTACH_PARENT_PROCESS = -1 (即 0xFFFFFFFF)
-        if ctypes.windll.kernel32.AttachConsole(-1):
-            if sys.stdout is None or getattr(sys.stdout, "closed", False):
-                sys.stdout = open("CONOUT$", "w", encoding="utf-8")
-            if sys.stderr is None or getattr(sys.stderr, "closed", False):
-                sys.stderr = open("CONOUT$", "w", encoding="utf-8")
-            return True
+        kernel32 = ctypes.windll.kernel32
+        attached = kernel32.AttachConsole(0xFFFFFFFF) != 0
+        if not attached:
+            return False
+
+        kernel32.SetConsoleOutputCP(65001)
+        kernel32.SetConsoleCP(65001)
+
+        for fd, fileno, mode, name in (
+            (1, 1, "w", "stdout"),
+            (2, 2, "w", "stderr"),
+        ):
+            try:
+                handle = kernel32.GetStdHandle(-11 if fd == 1 else -12)
+                if handle and handle != -1:
+                    os_fd = ctypes.cdll.msvcrt._open_osfhandle(handle, 0)
+                    if os_fd >= 0:
+                        f = open(os_fd, mode, encoding="utf-8", errors="replace", buffering=1)
+                        setattr(sys, name, f)
+            except Exception:
+                pass
+        return True
     except Exception:
-        pass
-    return False
-
-
-def _show_fatal_message(title: str, message: str) -> None:
-    """在无终端窗口环境下（如双击 exe 启动异常），弹出原生消息对话框。"""
-    if sys.platform == "win32":
-        try:
-            import ctypes
-
-            ctypes.windll.user32.MessageBoxW(0, str(message), str(title), 0x10)  # 0x10 = MB_ICONERROR
-            return
-        except Exception:
-            pass
-    sys.stderr.write(f"[{title}] {message}\n")
+        return False
 
 
 # ---------------------------------------------------------------------------
 # 子命令实现
 # ---------------------------------------------------------------------------
 
-
 def cmd_detect(args: argparse.Namespace) -> int:
     """执行 detect 环境诊断命令。"""
-    engine: Engine | None = None
-    try:
-        engine = find_engine()
-    except EngineNotFoundError:
-        pass
-
     word_engine: WordEngine = find_word_engine()
-
     sz_cmd = _find_seven_zip()
     cpu_count = os.cpu_count() or 1
-    mem_gb = _get_physical_memory_gb()
-    default_jobs = _default_jobs()
 
     print("==================================================")
     print("Windows Doc Tool (wdt) - 环境诊断")
     print("==================================================")
 
-    print("[转换引擎 - LibreOffice]")
-    if engine:
-        ver_str = f"{engine.version[0]}.{engine.version[1]}" if engine.version else "未知"
-        gray_support = "支持" if (engine.version and engine.version >= (7, 4)) else "不支持 (<7.4)"
-        print("  - 状态: 已就绪")
-        print(f"  - 路径: {engine.soffice}")
-        print(f"  - 来源: {engine.source}")
-        print(f"  - 版本: {ver_str}")
-        print(f"  - 原生灰度导出 (>=7.4): {gray_support}")
-    else:
-        print("  - 状态: ❌ 未找到可用的 LibreOffice / soffice 转换引擎！")
-        print("[安装提示 - LibreOffice]")
-        print("  - Linux:   sudo apt install libreoffice-writer-nogui")
-        print("  - macOS:   brew install --cask libreoffice")
-        print("  - Windows: 请安装 LibreOffice 或将 portable 运行时放置于 ./runtime/libreoffice")
-
     print("[转换引擎 - Microsoft Word COM]")
     if word_engine.available:
         print("  - 状态: 已就绪")
         print(f"  - 版本: {word_engine.version or '未知'}")
-        print(f"  - 路径: {word_engine.app_path or '未直接解析出路径 (通过 COM 注册表调度)'}")
+        print(f"  - 路径: {word_engine.app_path or '未直接解析出路径 (通过 COM 调度)'}")
     else:
         print(f"  - 状态: ❌ 不可用 ({word_engine.error or '未安装或无法通过 COM 自动化'})")
         if word_engine.version:
@@ -263,30 +223,17 @@ def cmd_detect(args: argparse.Namespace) -> int:
         if word_engine.app_path:
             print(f"  - 路径: {word_engine.app_path}")
 
-    # 推荐引擎说明
-    print("[推荐引擎策略 (auto 模式)]")
-    if engine and word_engine.available:
-        print("  - 双引擎就绪: 中小文件与常规 DOCX 走 LibreOffice 并发；超大文件/PDF 自动切 Word COM")
-    elif engine:
-        print("  - 单引擎模式: 仅 LibreOffice 可用，所有任务均由 LibreOffice 承载")
-    elif word_engine.available:
-        print("  - 单引擎模式: 仅 Word COM 可用，所有转换任务均由 Word 承载 (需支持 wincom 的阶段)")
-    else:
-        print("  - 警告: 无可用转换引擎，请先安装 LibreOffice 或 Microsoft Word")
-
     print("[归档与辅助工具]")
     if sz_cmd:
         print(f"  - 7-Zip (7z/7za): 可用 ({sz_cmd})")
     else:
-        print("  - 7-Zip (7z/7za): 未找到（大文件原位更新将降级为标准 zipfile）")
+        print("  - 7-Zip (7z/7za): 未找到（大文件原位更新将使用标准 zipfile）")
 
     print("[系统硬件资源]")
     print(f"  - CPU 核心数: {cpu_count}")
-    print(f"  - 可用物理内存: {mem_gb:.1f} GB")
-    print(f"  - 推荐默认并发数: {default_jobs}")
     print("==================================================")
 
-    return 0 if engine is not None else 1
+    return 0 if word_engine.available else 1
 
 
 def cmd_convert(args: argparse.Namespace) -> int:
@@ -296,7 +243,6 @@ def cmd_convert(args: argparse.Namespace) -> int:
         print(f"错误: 目标路径不存在 - {target_path}", file=sys.stderr)
         return 1
 
-    # 参数语义校验
     pages_range: tuple[int, int] | None = None
     if args.pages:
         if target_path.is_dir():
@@ -320,16 +266,6 @@ def cmd_convert(args: argparse.Namespace) -> int:
             print("错误: --pages 选项仅支持 PDF 导出，不能与 --to both 组合使用", file=sys.stderr)
             return 1
 
-    if target_fmt == "docx" and args.gray:
-        print("警告: --gray 仅在导出 PDF 时有效，当前目标格式为 docx，已忽略此选项。", file=sys.stderr)
-
-    # 探测 LibreOffice 引擎（纯 wincom 批次可不依赖 LibreOffice，交由流水线二次校验）
-    try:
-        engine = find_engine()
-    except EngineNotFoundError:
-        engine = None
-
-    # 收集文件
     try:
         files = collect_target_files(target_path, args.recursive, allowed_exts=SUPPORTED_EXTENSIONS)
     except Exception as e:
@@ -345,12 +281,9 @@ def cmd_convert(args: argparse.Namespace) -> int:
         out_dir=Path(args.outdir) if args.outdir else None,
         make_docx=(target_fmt in ("docx", "both")),
         make_pdf=(target_fmt in ("pdf", "both")),
-        gray=args.gray,
-        jobs=args.jobs,
         force=args.force,
         pages=pages_range,
         base_dir=target_path if target_path.is_dir() else None,
-        engine_mode=normalize_engine_choice(args.engine),
     )
 
     if pages_range is not None:
@@ -365,7 +298,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         print(f"📄 提取页码转换: {src.name} (页码: {p_start}-{p_end}) → {dst_pdf.name}")
         t0 = time.time()
         try:
-            events = run_pipeline(files, options, engine=engine)
+            events = run_pipeline(files, options)
         except (EngineNotFoundError, ValueError) as e:
             print(f"错误: {e}", file=sys.stderr)
             return 1
@@ -377,7 +310,6 @@ def cmd_convert(args: argparse.Namespace) -> int:
         print(f"✓ 转换完成 ({elapsed:.2f}s) → {dst_pdf}")
         return 0
 
-    # 批量转换
     digits = len(str(len(files)))
     done_counter = 0
 
@@ -390,9 +322,9 @@ def cmd_convert(args: argparse.Namespace) -> int:
         elif ev.status == "failed":
             print(f"  {prefix} ✗ 失败: {ev.src.name} - {ev.message}")
 
-    print(f"\n🚀 开始转换至 {target_fmt.upper()} 格式（引擎模式: {options.engine_mode}，待转换: {len(files)} 个文档）...")
+    print(f"\n🚀 开始转换至 {target_fmt.upper()} 格式（Word COM 引擎，待转换: {len(files)} 个文档）...")
     try:
-        events = run_pipeline(files, options, progress_cb=progress_cb, engine=engine)
+        events = run_pipeline(files, options, progress_cb=progress_cb)
     except (EngineNotFoundError, ValueError) as e:
         print(f"错误: {e}", file=sys.stderr)
         return 1
@@ -422,13 +354,10 @@ def cmd_toc(args: argparse.Namespace) -> int:
         else:
             target_files.append(Path(pattern))
 
-    target_files = [f.resolve() for f in sorted(set(target_files))]
+    target_files = [f.resolve() for f in target_files if f.suffix.lower() == ".docx"]
     if not target_files:
-        print("错误: 未指定任何待注入目录的 docx 文件", file=sys.stderr)
+        print("错误: 未指定任何合法的 docx 文件", file=sys.stderr)
         return 1
-
-    if args.page_mode == "static-offset" and args.page_offset == 0:
-        print("警告: --page-mode static-offset 建议指定 --page-offset N (当前偏移量为 0)", file=sys.stderr)
 
     try:
         config = build_toc_config(
@@ -447,8 +376,6 @@ def cmd_toc(args: argparse.Namespace) -> int:
     options = PipelineOptions(
         mode="toc",
         toc=config,
-        jobs=1,
-        engine_mode=normalize_engine_choice(args.engine),
     )
 
     print(f"📑 开始向 {len(target_files)} 个文档注入 TOC 目录 (样式: {args.style}, 深度: {args.depth})...\n")
@@ -465,14 +392,8 @@ def cmd_toc(args: argparse.Namespace) -> int:
         elif ev.status == "failed":
             print(f"  {prefix} ✗ 失败: {ev.src.name} - {ev.message}")
 
-    engine = None
-    if args.page_mode == "measured":
-        try:
-            engine = find_engine()
-        except EngineNotFoundError:
-            engine = None
     try:
-        events = run_pipeline(target_files, options, progress_cb=progress_cb, engine=engine)
+        events = run_pipeline(target_files, options, progress_cb=progress_cb)
     except (EngineNotFoundError, ValueError) as e:
         print(f"错误: {e}", file=sys.stderr)
         return 1
@@ -489,25 +410,10 @@ def cmd_toc(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     """执行 run 端到端流水线命令。"""
-    if args.pdf and args.page_mode == "dynamic":
-        print(
-            "错误: --pdf 不能与 --page-mode dynamic 同时使用（无头 LibreOffice 不会自动刷新动态目录域）",
-            file=sys.stderr,
-        )
-        return 1
-
-    if args.page_mode == "static-offset" and args.page_offset == 0:
-        print("警告: --page-mode static-offset 建议指定 --page-offset N (当前偏移量为 0)", file=sys.stderr)
-
     target_path = Path(args.target).resolve()
     if not target_path.exists():
         print(f"错误: 目标路径不存在 - {target_path}", file=sys.stderr)
         return 1
-
-    try:
-        engine = find_engine()
-    except EngineNotFoundError:
-        engine = None
 
     try:
         files = collect_target_files(target_path, args.recursive, allowed_exts=SUPPORTED_EXTENSIONS)
@@ -538,17 +444,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         out_dir=Path(args.outdir) if args.outdir else None,
         make_docx=True,
         make_pdf=args.pdf,
-        gray=args.gray,
         toc=toc_config,
-        jobs=args.jobs,
         force=args.force,
         base_dir=target_path if target_path.is_dir() else None,
-        engine_mode=normalize_engine_choice(args.engine),
     )
 
-    print(f"🔄 启动一体化流水线: 待处理 {len(files)} 个文档 (导出PDF: {args.pdf}, 引擎模式: {options.engine_mode})...\n")
-
-    failed_items: list[str] = []
+    print(f"🔄 启动一体化流水线: 待处理 {len(files)} 个文档 (导出PDF: {args.pdf}, Word COM 引擎)...\n")
 
     def progress_cb(ev: PipelineEvent) -> None:
         stage_name = {
@@ -561,64 +462,48 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"  ✓ [{stage_name}] 成功: {ev.src.name} ({ev.message})")
         elif ev.status == "failed":
             print(f"  ✗ [{stage_name}] 失败: {ev.src.name} - {ev.message}")
-            failed_items.append(f"{ev.src.name} ({stage_name}失败: {ev.message})")
         elif ev.status == "skipped":
             print(f"  ⏩ [{stage_name}] 跳过: {ev.src.name} - {ev.message}")
 
     try:
-        events = run_pipeline(files, options, progress_cb=progress_cb, engine=engine)
+        events = run_pipeline(files, options, progress_cb=progress_cb)
     except (EngineNotFoundError, ValueError) as e:
         print(f"错误: {e}", file=sys.stderr)
         return 1
 
-    # 统计独立成功的文件
     unique_failed_srcs = {e.src for e in events if e.status == "failed"}
     success_count = len(files) - len(unique_failed_srcs)
 
     print("\n" + "=" * 50)
     print("🎉 一体化流水线执行完毕！")
-    print(f"   ✓ 成功完成: {success_count} 个")
-    print(f"   ✗ 处理失败: {len(unique_failed_srcs)} 个")
-    if failed_items:
-        for fi in failed_items:
-            print(f"     - {fi}")
+    print(f"   ✓ 成功: {success_count} 个")
+    print(f"   ✗ 失败: {len(unique_failed_srcs)} 个")
     print("=" * 50)
 
     return 0 if len(unique_failed_srcs) == 0 else 1
 
 
-def cmd_gui(args: argparse.Namespace | None = None) -> int:
-    """启动图形界面 (PySide6)。"""
+def cmd_gui(args: argparse.Namespace) -> int:
+    """执行 gui 启动桌面图形交互界面命令。"""
     try:
         from wdt.ui.main_window import launch_gui
+        return launch_gui()
     except ImportError as e:
-        msg = f"无法启动图形界面，缺少依赖: {e}\n若为源码运行请执行: pip install \".[gui]\""
-        _show_fatal_message("Windows Doc Tool 启动错误", msg)
-        print(f"错误: {msg}", file=sys.stderr)
+        print(f"错误: 未安装图形交互依赖 (PySide6): {e}", file=sys.stderr)
+        print("提示: 请使用 'uv pip install .[gui]' 安装 GUI 依赖后再启动。", file=sys.stderr)
         return 1
-    except Exception as e:
-        msg = f"启动图形界面时发生未知异常: {e}"
-        _show_fatal_message("Windows Doc Tool 启动错误", msg)
-        print(f"错误: {msg}", file=sys.stderr)
-        return 1
-    return launch_gui()
-
-
-# ---------------------------------------------------------------------------
-# CLI 总调度
-# ---------------------------------------------------------------------------
 
 
 def build_parser() -> WdtArgumentParser:
     """构建顶层 CLI 参数解析器。"""
     parser = WdtArgumentParser(
         prog="wdt",
-        description="Windows Doc Tool (wdt) - 高性能办公与临床大文件批处理与目录注入工具",
+        description="Windows Doc Tool (wdt) - Windows 原生 Word COM 文档批处理与动态目录注入工具",
     )
     subparsers = parser.add_subparsers(dest="subcommand", metavar="COMMAND")
 
     # 1. detect
-    sub_detect = subparsers.add_parser("detect", help="检查运行环境与依赖")
+    sub_detect = subparsers.add_parser("detect", help="检查运行环境与 Word COM 引擎")
     sub_detect.set_defaults(func=cmd_detect)
 
     # 2. convert
@@ -626,22 +511,14 @@ def build_parser() -> WdtArgumentParser:
     sub_conv.add_argument("target", help="目标文件或包含文档的目录")
     sub_conv.add_argument("-r", "--recursive", action="store_true", help="递归扫描子目录")
     sub_conv.add_argument("-o", "--outdir", default=None, help="指定输出目录")
-    sub_conv.add_argument("-j", "--jobs", type=int, default=None, help="并发工作者数")
     sub_conv.add_argument(
         "--to",
         choices=["docx", "pdf", "both"],
         default="docx",
         help="目标输出格式（默认 docx）",
     )
-    sub_conv.add_argument("--gray", action="store_true", help="导出灰度 PDF（需要 LO >= 7.4）")
     sub_conv.add_argument("--pages", default=None, help="仅转换指定页码区间 A-B（仅限单文件）")
     sub_conv.add_argument("-f", "--force", action="store_true", help="强制覆盖已存在的目标文件")
-    sub_conv.add_argument(
-        "--engine",
-        choices=["auto", "libreoffice", "wincom", "lo", "com"],
-        default="auto",
-        help="转换与渲染引擎（默认 auto：按文件大小/格式自动仲裁；lo=libreoffice, com=wincom）",
-    )
     sub_conv.set_defaults(func=cmd_convert)
 
     # 3. toc
@@ -669,17 +546,11 @@ def build_parser() -> WdtArgumentParser:
     sub_toc.add_argument(
         "--page-mode",
         choices=["static-restart", "static-offset", "static-in-place", "measured", "dynamic"],
-        default="static-restart",
-        help="页码计算模式（默认 static-restart）",
+        default="dynamic",
+        help="页码计算模式（默认 dynamic 原生动态域）",
     )
     sub_toc.add_argument("--page-offset", type=int, default=0, help="页码偏移补偿量")
     sub_toc.add_argument("--no-backup", action="store_true", help="就地修改，不保留 .bak 备份文件")
-    sub_toc.add_argument(
-        "--engine",
-        choices=["auto", "libreoffice", "wincom", "lo", "com"],
-        default="auto",
-        help="实测页码测量引擎（默认 auto：按文件大小/格式自动仲裁；lo=libreoffice, com=wincom）",
-    )
     sub_toc.set_defaults(func=cmd_toc)
 
     # 4. run
@@ -687,7 +558,6 @@ def build_parser() -> WdtArgumentParser:
     sub_run.add_argument("target", help="目标文件或包含文档的目录")
     sub_run.add_argument("-r", "--recursive", action="store_true", help="递归扫描子目录")
     sub_run.add_argument("-o", "--outdir", default=None, help="指定输出目录")
-    sub_run.add_argument("-j", "--jobs", type=int, default=None, help="并发工作者数")
     sub_run.add_argument(
         "--style",
         choices=["classic", "modern", "regulatory", "minimal"],
@@ -709,20 +579,13 @@ def build_parser() -> WdtArgumentParser:
     )
     sub_run.add_argument(
         "--page-mode",
-        choices=["measured", "static-restart", "static-offset", "static-in-place", "dynamic"],
-        default="measured",
-        help="页码计算模式（默认 measured）",
+        choices=["dynamic", "measured", "static-restart", "static-offset", "static-in-place"],
+        default="dynamic",
+        help="页码计算模式（默认 dynamic 原生动态域）",
     )
     sub_run.add_argument("--page-offset", type=int, default=0, help="页码偏移补偿量")
     sub_run.add_argument("--pdf", action="store_true", help="级联生成 PDF")
-    sub_run.add_argument("--gray", action="store_true", help="导出的 PDF 为灰度版本")
     sub_run.add_argument("-f", "--force", action="store_true", help="强制覆盖已存在的目标文件")
-    sub_run.add_argument(
-        "--engine",
-        choices=["auto", "libreoffice", "wincom", "lo", "com"],
-        default="auto",
-        help="转换与渲染引擎（默认 auto：按文件大小/格式自动仲裁；lo=libreoffice, com=wincom）",
-    )
     sub_run.set_defaults(func=cmd_run)
 
     # 5. gui
@@ -734,14 +597,11 @@ def build_parser() -> WdtArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI 主入口函数，返回整型退出码。"""
-    # PyInstaller 冻结环境下 Windows 以 spawn 启动多进程子进程，
-    # 必须最先调用 freeze_support()，否则 worker 会重新执行本入口导致进程风暴
     multiprocessing.freeze_support()
 
     if argv is None:
         argv = sys.argv[1:]
 
-    # Windows 下尝试附着控制台（供命令行终端实时输出）
     has_console = _attach_windows_console()
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -751,50 +611,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             except Exception:
                 pass
 
-    # 桌面用户双击桌面图标、快捷方式或直接双击 wdt.exe 启动时无传入参数，且无控制台
-    # 此时默认直接启动图形界面 (GUI)；若在终端命令行或测试环境中无参数运行，则打印帮助信息
-    if not argv:
-        if sys.platform == "win32" and not has_console and "PYTEST_CURRENT_TEST" not in os.environ:
-            try:
-                return cmd_gui()
-            except Exception as e:
-                _show_fatal_message("Windows Doc Tool 启动错误", f"界面初始化异常:\n{e}")
-                return 1
-
-        parser = build_parser()
-        parser.print_help()
-        return 0
+    # Windows 环境且无终端控制台（双击 exe 启动）且未传参数时，默认启动 GUI
+    if not argv and sys.platform == "win32" and not has_console and not os.environ.get("PYTEST_CURRENT_TEST"):
+        return cmd_gui()
 
     parser = build_parser()
-
-    try:
-        args = parser.parse_args(argv)
-        setattr(args, "_raw_argv", list(argv))
-    except SystemExit as e:
-        code = e.code
-        if code is None:
-            return 0
-        if isinstance(code, int):
-            return code
-        return 1
-    except Exception as e:
-        sys.stderr.write(f"参数解析错误: {e}\n")
-        return 2
-
-    if not hasattr(args, "func"):
+    setattr(parser, "_raw_argv", argv)
+    if not argv:
         parser.print_help()
         return 0
 
-    try:
-        return args.func(args)
-    except SystemExit as e:
-        code = e.code
-        if code is None:
-            return 0
-        if isinstance(code, int):
-            return code
-        return 1
-    except Exception as e:
-        sys.stderr.write(f"执行异常: {e}\n")
-        return 1
+    args = parser.parse_args(argv)
+    setattr(args, "_raw_argv", argv)
 
+    func = getattr(args, "func", None)
+    if func:
+        return func(args)
+
+    parser.print_help()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

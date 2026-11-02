@@ -11,7 +11,6 @@ from typing import Sequence
 
 from PySide6.QtCore import QThread, Signal
 
-from wdt.core.engine_finder import Engine
 from wdt.pipeline import PipelineEvent, PipelineOptions, run_pipeline
 
 
@@ -26,13 +25,11 @@ class PipelineWorker(QThread):
         self,
         files: Sequence[Path],
         options: PipelineOptions,
-        engine: Engine | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.files = list(files)
         self.options = options
-        self.engine = engine
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -53,7 +50,6 @@ class PipelineWorker(QThread):
                 options=self.options,
                 progress_cb=self._on_event,
                 should_cancel=self._should_cancel,
-                engine=self.engine,
             )
             self.finished_signal.emit(results)
         except Exception as e:

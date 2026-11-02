@@ -103,7 +103,6 @@ def test_ui_options_mapping_run_mode(main_window):
     main_window.combo_page_mode.setCurrentIndex(1)  # static-offset
     main_window.spin_offset.setValue(5)
     main_window.chk_backup.setChecked(False)
-    main_window.spin_jobs.setValue(4)
 
     opts: PipelineOptions = main_window.get_pipeline_options()
 
@@ -112,7 +111,7 @@ def test_ui_options_mapping_run_mode(main_window):
     assert opts.make_pdf is True
     assert opts.gray is True
     assert opts.force is True
-    assert opts.jobs == 4
+    assert opts.jobs == 1
 
     assert opts.toc is not None
     assert opts.toc.style == TocStyle.MODERN_ACCENT
@@ -182,26 +181,27 @@ def test_clear_and_remove_items(tmp_path: Path, main_window):
     assert len(main_window.files_list) == 0
 
 
-def test_dynamic_pdf_conflict_dialog_interception(tmp_path: Path, main_window, monkeypatch):
-    """测试 dynamic + PDF 冲突时拦截并弹出警告。"""
+def test_missing_word_engine_dialog_interception(tmp_path: Path, main_window, monkeypatch):
+    """测试 Word 引擎缺失时拦截并弹出警告。"""
+    from wdt.core.engine_finder import WordEngine
+    main_window.word_engine = WordEngine(available=False, version="", app_path=None, error="Word not installed")
+
     doc = tmp_path / "a.docx"
     doc.write_bytes(b"test")
     main_window.add_paths([doc])
 
     main_window.radio_mode_run.setChecked(True)
     main_window.chk_pdf.setChecked(True)
-    main_window.combo_page_mode.setCurrentIndex(3)  # dynamic
 
     alert_called = False
 
     def mock_critical(parent, title, text):
         nonlocal alert_called
         alert_called = True
-        assert "「Word 动态域」页码模式不能与 PDF 导出同时使用" in text
+        assert "缺少 Word COM 引擎" in title
 
     monkeypatch.setattr(QMessageBox, "critical", mock_critical)
     main_window.on_start_pipeline()
 
     assert alert_called is True
-    # 保证未启动 worker
     assert main_window.worker is None

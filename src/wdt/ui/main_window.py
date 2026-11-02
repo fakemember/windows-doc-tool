@@ -44,8 +44,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from wdt.core.batch_runner import _default_jobs
-from wdt.core.engine_finder import Engine, EngineNotFoundError, find_engine
+from wdt.core.engine_finder import WordEngine, find_word_engine
 from wdt.pipeline import (
     PipelineEvent,
     PipelineOptions,
@@ -150,7 +149,7 @@ class MainWindow(QMainWindow):
         self.files_list: list[Path] = []
         self.file_row_map: dict[Path, int] = {}
         self.worker: PipelineWorker | None = None
-        self.engine: Engine | None = None
+        self.word_engine: WordEngine | None = None
 
         self._init_engine()
         self._init_ui()
@@ -163,10 +162,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _init_engine(self) -> None:
-        try:
-            self.engine = find_engine()
-        except EngineNotFoundError:
-            self.engine = None
+        self.word_engine = find_word_engine()
 
     def _init_ui(self) -> None:
         central_widget = QWidget(self)
@@ -574,10 +570,11 @@ class MainWindow(QMainWindow):
         label.setObjectName("formLabel")
         jobs_row.addWidget(label)
         self.spin_jobs = QSpinBox(self.perf_card)
-        self.spin_jobs.setRange(1, 8)
-        self.spin_jobs.setValue(_default_jobs())
+        self.spin_jobs.setRange(1, 1)
+        self.spin_jobs.setValue(1)
+        self.spin_jobs.setEnabled(False)
         jobs_row.addWidget(self.spin_jobs)
-        tip_label = QLabel("根据 CPU 与内存自动推荐", self.perf_card)
+        tip_label = QLabel("Word COM 采用受控单实例串行转换", self.perf_card)
         tip_label.setObjectName("hintLabel")
         jobs_row.addWidget(tip_label, 1)
         perf_layout.addLayout(jobs_row)
@@ -595,22 +592,20 @@ class MainWindow(QMainWindow):
 
     def _update_engine_pill(self) -> None:
         """刷新标题栏引擎状态徽标。"""
-        if self.engine is not None:
-            ver = f"{self.engine.version[0]}.{self.engine.version[1]}" if self.engine.version else "未知版本"
-            source_map = {"bundled": "内置运行时", "path": "PATH", "system": "系统安装"}
-            source = source_map.get(self.engine.source, self.engine.source)
-            self.engine_pill.setText(f" ● LibreOffice {ver} · {source} ")
-            self.engine_pill.setToolTip(f"转换引擎路径：{self.engine.soffice}")
+        if self.word_engine is not None and self.word_engine.available:
+            ver = self.word_engine.version or "已就绪"
+            self.engine_pill.setText(f" ● Microsoft Word {ver} ")
+            self.engine_pill.setToolTip(f"Word COM 引擎已就绪: {self.word_engine.app_path or '系统注册表调度'}")
             self.engine_pill.setStyleSheet(
                 "background-color: #ECFDF5; color: #047857; "
                 "border: 1px solid #A7F3D0; border-radius: 10px; padding: 4px 10px; font-size: 12px;"
             )
             self.btn_recheck_engine.setVisible(False)
         else:
-            self.engine_pill.setText(" ⚠ 未检测到转换引擎 ")
+            self.engine_pill.setText(" ⚠ 未检测到 Word COM 引擎 ")
             self.engine_pill.setToolTip(
-                "未检测到 LibreOffice，仅目录注入模式可用。"
-                "安装 LibreOffice 或放置便携运行时后，点击右侧「重新检测」。"
+                "未检测到 Microsoft Word 或 pywin32。\n"
+                "请安装 Microsoft Word 后点击右侧「重新检测」。"
             )
             self.engine_pill.setStyleSheet(
                 "background-color: #FFFBEB; color: #B45309; "
@@ -621,17 +616,18 @@ class MainWindow(QMainWindow):
     def _on_recheck_engine(self) -> None:
         self._init_engine()
         self._update_engine_pill()
-        if self.engine is not None:
+        if self.word_engine is not None and self.word_engine.available:
             QMessageBox.information(
                 self,
                 "检测成功",
-                f"已检测到转换引擎：{self.engine.soffice}\n版本：{self.engine.version}",
+                f"已检测到 Microsoft Word COM 自动化引擎\n版本：{self.word_engine.version or '未知'}",
             )
         else:
+            err = self.word_engine.error if self.word_engine else "未知原因"
             QMessageBox.warning(
                 self,
                 "未检测到引擎",
-                "仍未检测到 LibreOffice，请检查安装路径。",
+                f"未检测到 Microsoft Word COM 引擎：{err}",
             )
 
     # ------------------------------------------------------------------
@@ -899,28 +895,13 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # 校验 2: dynamic + PDF 互斥拒绝
-        if (
-            options.mode == "run"
-            and options.make_pdf
-            and options.toc is not None
-            and options.toc.page_mode == PageMode.DYNAMIC
-        ):
+        # 校验 2: 检查 Word COM 引擎
+        if options.mode in ("run", "convert") and (self.word_engine is None or not self.word_engine.available):
             QMessageBox.critical(
                 self,
-                "模式冲突",
-                "「Word 动态域」页码模式不能与 PDF 导出同时使用。\n"
-                "转换为 PDF 时不会更新页码域，请改用「重新编页」或「页码偏移」。",
-            )
-            return
-
-        # 校验 3: 如果需要调用 LibreOffice 进行格式转换，检查引擎
-        if options.mode in ("run", "convert") and self.engine is None:
-            QMessageBox.critical(
-                self,
-                "缺少转换引擎",
-                "当前模式需要 LibreOffice 转换引擎，但系统中未检测到。\n"
-                "请安装 LibreOffice 后点击右上角「重新检测」，或改用「目录注入」模式。",
+                "缺少 Word COM 引擎",
+                "当前模式需要 Microsoft Word COM 自动化引擎，但系统中未就绪。\n"
+                "请安装 Microsoft Word 并确保 pywin32 正常后重试。",
             )
             return
 
@@ -955,7 +936,6 @@ class MainWindow(QMainWindow):
         self.worker = PipelineWorker(
             files=self.files_list,
             options=options,
-            engine=self.engine,
             parent=self,
         )
         self.worker.event_signal.connect(self._on_pipeline_event)
