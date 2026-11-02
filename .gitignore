@@ -7,3 +7,7 @@ __pycache__/
 /dist/
 runtime/
 *.bak
+output/
+output_*/
+*.tmp
+
