@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 from typing import Sequence
 
+from wdt import __version__
 from wdt.core.batch_runner import _default_jobs, _get_physical_memory_gb
 from wdt.core.engine_finder import Engine, EngineNotFoundError, find_engine
 from wdt.pipeline import (
@@ -71,7 +72,6 @@ def collect_target_files(
     if target.is_dir():
         files: list[Path] = []
         for ext in allowed_exts:
-            pattern = f"*{ext}" if not recursive else f"**/*{ext}"
             files.extend(target.rglob(f"*{ext}") if recursive else target.glob(f"*{ext}"))
         return [
             f.resolve()
@@ -565,6 +565,7 @@ def build_parser() -> WdtArgumentParser:
         prog="wdt",
         description="Windows Doc Tool (wdt) - 高性能办公与临床大文件批处理与目录注入工具",
     )
+    parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="subcommand", metavar="COMMAND")
 
     # 1. detect
