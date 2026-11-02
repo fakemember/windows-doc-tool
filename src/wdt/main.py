@@ -208,7 +208,7 @@ def cmd_detect(args: argparse.Namespace) -> int:
     cpu_count = os.cpu_count() or 1
 
     print("==================================================")
-    print("Windows Doc Tool (wdt) - 环境诊断")
+    print("TFLOW (Clinical TFL & Document Pipeline) - 环境诊断")
     print("==================================================")
 
     print("[转换引擎 - Microsoft Word COM]")
@@ -497,8 +497,8 @@ def cmd_gui(args: argparse.Namespace) -> int:
 def build_parser() -> WdtArgumentParser:
     """构建顶层 CLI 参数解析器。"""
     parser = WdtArgumentParser(
-        prog="wdt",
-        description="Windows Doc Tool (wdt) - Windows 原生 Word COM 文档批处理与动态目录注入工具",
+        prog="tflow",
+        description="TFLOW - 临床 TFL 报告与文档批处理流水线（原生动态 TOC 编排 & Microsoft Word COM 自动化引擎）",
     )
     subparsers = parser.add_subparsers(dest="subcommand", metavar="COMMAND")
 

@@ -138,13 +138,19 @@ class DropArea(QFrame):
 
 
 class MainWindow(QMainWindow):
-    """Windows Doc Tool 主界面。"""
+    """TFLOW 主界面。"""
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Windows Doc Tool (wdt) - 办公与临床文档批处理工具")
+        self.setWindowTitle("TFLOW - 临床 TFL 报告与文档批处理流水线")
         self.resize(1180, 780)
         self.setMinimumSize(960, 640)
+
+        # 尝试设置窗口图标
+        logo_svg = Path(__file__).parent / "assets" / "tflow_logo.svg"
+        if logo_svg.is_file():
+            from PySide6.QtGui import QIcon
+            self.setWindowIcon(QIcon(str(logo_svg)))
 
         self.files_list: list[Path] = []
         self.file_row_map: dict[Path, int] = {}
@@ -237,21 +243,21 @@ class MainWindow(QMainWindow):
         header_layout.setContentsMargins(16, 10, 16, 10)
         header_layout.setSpacing(10)
 
-        brand_badge = QLabel("W", header_bar)
+        brand_badge = QLabel("T", header_bar)
         brand_badge.setFixedSize(34, 34)
         brand_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         brand_badge.setStyleSheet(
-            "background-color: #2563EB; color: #FFFFFF; "
-            "font-size: 17px; font-weight: 700; border-radius: 8px;"
+            "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #2563EB, stop:1 #06B6D4); "
+            "color: #FFFFFF; font-size: 18px; font-weight: 800; border-radius: 8px;"
         )
         header_layout.addWidget(brand_badge)
 
         brand_text = QVBoxLayout()
         brand_text.setSpacing(0)
-        brand_title = QLabel("Windows Doc Tool", header_bar)
-        brand_title.setStyleSheet("font-size: 15px; font-weight: 700; color: #111827;")
-        brand_sub = QLabel("办公与临床文档批处理工具", header_bar)
-        brand_sub.setStyleSheet("font-size: 11px; color: #6B7280;")
+        brand_title = QLabel("TFLOW", header_bar)
+        brand_title.setStyleSheet("font-size: 16px; font-weight: 800; color: #111827; letter-spacing: 0.5px;")
+        brand_sub = QLabel("Clinical TFL & Document Pipeline", header_bar)
+        brand_sub.setStyleSheet("font-size: 11px; color: #6B7280; font-weight: 500;")
         brand_text.addWidget(brand_title)
         brand_text.addWidget(brand_sub)
         header_layout.addLayout(brand_text)

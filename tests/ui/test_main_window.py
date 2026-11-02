@@ -42,7 +42,7 @@ def main_window(qapp):
 
 def test_main_window_init(main_window):
     """测试主窗口与核心控件初始化。"""
-    assert main_window.windowTitle().startswith("Windows Doc Tool")
+    assert main_window.windowTitle().startswith("TFLOW")
     assert main_window.table.columnCount() == 5
     assert main_window.btn_start.isEnabled() is True
     assert main_window.btn_cancel.isEnabled() is False

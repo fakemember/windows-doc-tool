@@ -24,14 +24,14 @@ def test_main_no_args(capsys):
     ret = main([])
     assert ret == 0
     captured = capsys.readouterr()
-    assert "usage: wdt" in captured.out or "Windows Doc Tool" in captured.out
+    assert "usage: tflow" in captured.out or "TFLOW" in captured.out or "usage: wdt" in captured.out
 
 
 def test_detect_cmd(capsys):
     """测试 detect 子命令环境诊断正常运行。"""
     ret = main(["detect"])
     captured = capsys.readouterr()
-    assert "Windows Doc Tool (wdt) - 环境诊断" in captured.out
+    assert "TFLOW" in captured.out and "环境诊断" in captured.out
     assert "Microsoft Word COM" in captured.out
 
 

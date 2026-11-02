@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- 沉稳深色背景渐变 -->
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0B132B"/>
+      <stop offset="100%" stop-color="#1C2541"/>
+    </linearGradient>
+
+    <!-- T 字横梁与主流水渐变 -->
+    <linearGradient id="flowHorizontal" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#2563EB"/>
+      <stop offset="50%" stop-color="#06B6D4"/>
+      <stop offset="100%" stop-color="#10B981"/>
+    </linearGradient>
+
+    <!-- TFL / TOC 阶梯竖柱渐变 -->
+    <linearGradient id="stemGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3B82F6"/>
+      <stop offset="100%" stop-color="#1D4ED8"/>
+    </linearGradient>
+
+    <!-- 高亮光感 -->
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#34D399"/>
+    </linearGradient>
+
+    <!-- 柔和立体投影 -->
+    <filter id="shadow" x="-20%" y="-20%" width="150%" height="150%">
+      <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="#000000" flood-opacity="0.5"/>
+    </filter>
+  </defs>
+
+  <!-- 圆角应用底座 (Squircle) -->
+  <rect width="512" height="512" rx="116" fill="url(#bg)"/>
+
+  <!-- 科技背景微光同心轨道 -->
+  <circle cx="256" cy="256" r="200" fill="none" stroke="#334155" stroke-width="1.5" stroke-dasharray="6 8" opacity="0.4"/>
+  <circle cx="256" cy="256" r="145" fill="none" stroke="#38BDF8" stroke-width="1" stroke-dasharray="3 9" opacity="0.25"/>
+
+  <!-- TFLOW 核心主体图标 (结合 T + Flow + TOC/TFL 阶梯) -->
+  <g filter="url(#shadow)">
+    <!-- 1. T 的顶部流动横梁 (The Flow Bar) -->
+    <path d="M120 136 
+             C120 122.745 130.745 112 144 112 
+             H340 
+             L392 164 
+             V168 
+             C392 181.255 381.255 192 368 192 
+             H144 
+             C130.745 192 120 181.255 120 168 
+             Z" 
+          fill="url(#flowHorizontal)"/>
+
+    <!-- 顶部横梁上的文档折角装饰 (象征 DOC/PDF 属性) -->
+    <path d="M340 112 L392 164 H356 C347.163 164 340 156.837 340 148 V112 Z" 
+          fill="#E2E8F0" 
+          opacity="0.85"/>
+
+    <!-- 2. T 的竖向主体结构：3 层递进的 TFL/TOC 大纲阶梯 (Heading 1/2/3) -->
+    <!-- 第一层：顶梁基座 (Table / H1) -->
+    <rect x="226" y="212" width="60" height="44" rx="12" fill="url(#stemGrad)"/>
+    <rect x="240" y="228" width="32" height="12" rx="6" fill="#FFFFFF" opacity="0.9"/>
+    
+    <!-- 第二层：中间延伸并向右微展 (Figure / H2 / 目录展开) -->
+    <rect x="226" y="272" width="96" height="44" rx="12" fill="url(#stemGrad)"/>
+    <rect x="240" y="288" width="48" height="12" rx="6" fill="url(#accentGrad)"/>
+    <circle cx="304" cy="294" r="5" fill="#38BDF8"/>
+
+    <!-- 第三层：底部延伸更长 (Listing / H3 / 终点交付) -->
+    <rect x="226" y="332" width="134" height="44" rx="12" fill="url(#stemGrad)"/>
+    <rect x="240" y="348" width="70" height="12" rx="6" fill="url(#accentGrad)"/>
+    <circle cx="328" cy="354" r="5" fill="#34D399"/>
+    <circle cx="344" cy="354" r="3" fill="#A7F3D0"/>
+  </g>
+
+  <!-- 3. 左下角流动光子点缀 (象征流水线流动驱动) -->
+  <circle cx="160" cy="354" r="7" fill="#06B6D4" opacity="0.8"/>
+  <path d="M160 354 Q 185 354 210 354" stroke="#06B6D4" stroke-width="3" stroke-dasharray="4 4" stroke-linecap="round" opacity="0.6"/>
+</svg>

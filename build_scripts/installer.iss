@@ -1,41 +1,36 @@
 ; =====================================================================
-; Windows Doc Tool (wdt) - Inno Setup 6 安装包编译脚本
+; TFLOW - Inno Setup 6 安装包编译脚本
 ; =====================================================================
 ; 说明：
-; 本脚本用于将 PyInstaller one-dir 产物、裁剪后的便携式 LibreOffice 运行时
-; 以及合规许可证文本打包为 Windows 原生安装程序（.exe 安装包）。
+; 本脚本用于将 PyInstaller one-dir 产物以及合规许可证文本打包为
+; Windows 原生安装程序（.exe 安装包）。
 ;
 ; 编译方式示例（通过 ISCC 命令行）：
-;   ISCC.exe /DAppVersion=0.1.0 /DSourceDir=..\dist\wdt build_scripts\installer.iss
+;   ISCC.exe /DAppVersion=0.2.0 /DSourceDir=..\dist\tflow build_scripts\installer.iss
 ;
 ; 宏定义参数说明（可通过命令行 /D 传入覆盖）：
-;   - AppVersion: 软件版本号（必需从命令行传入，默认兜底 "0.1.0"）
-;   - AppName:    软件显示名称（默认 "Windows Doc Tool"）
-;   - AppExeName: 主程序可执行文件名（默认 "wdt.exe"）
-;   - SourceDir:  PyInstaller 打包产物目录（默认 "..\dist\wdt"）
-;   - RuntimeDir: 裁剪版便携运行时目录（默认 "..\runtime"）
+;   - AppVersion: 软件版本号（默认 "0.2.0"）
+;   - AppName:    软件显示名称（默认 "TFLOW"）
+;   - AppExeName: 主程序可执行文件名（默认 "tflow.exe"）
+;   - SourceDir:  PyInstaller 打包产物目录（默认 "..\dist\tflow"）
 ;   - LicenseDir: 许可证文件目录（默认 "..\licenses"）
 ;   - OutputDir:  安装包生成输出目录（默认 "..\dist"）
 ; =====================================================================
 
 #ifndef AppVersion
-  #define AppVersion "0.1.0"
+  #define AppVersion "0.2.0"
 #endif
 
 #ifndef AppName
-  #define AppName "Windows Doc Tool"
+  #define AppName "TFLOW"
 #endif
 
 #ifndef AppExeName
-  #define AppExeName "wdt.exe"
+  #define AppExeName "tflow.exe"
 #endif
 
 #ifndef SourceDir
-  #define SourceDir "..\dist\wdt"
-#endif
-
-#ifndef RuntimeDir
-  #define RuntimeDir "..\runtime"
+  #define SourceDir "..\dist\tflow"
 #endif
 
 #ifndef LicenseDir
@@ -56,7 +51,7 @@ DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 AllowNoIcons=yes
 OutputDir={#OutputDir}
-OutputBaseFilename=WindowsDocTool_Setup_v{#AppVersion}
+OutputBaseFilename=TFLOW_Setup_v{#AppVersion}
 Compression=lzma2/ultra64
 SolidCompression=yes
 ; 采用普通用户权限模式，无需管理员 UAC 提权，不写系统注册表
