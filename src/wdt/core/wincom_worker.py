@@ -462,6 +462,12 @@ def export_pdf_com(
         if tmp_dst.exists():
             tmp_dst.unlink(missing_ok=True)
 
+        # 刷新文档域代码（包括 TOC、PAGEREF 动态页码域），确保导出的 PDF 具备真实精确页码
+        try:
+            doc.Fields.Update()
+        except Exception:
+            pass
+
         # 与实测基准 (19.9 min / 3,815 页) 保持一致的精简参数集。
         # 切勿追加 DocStructureTags/BitmapMissingFonts 等参数：
         # BitmapMissingFonts=True 在字体缺失时按位图渲染文本，实测导出吞吐下降数倍导致超时。
@@ -488,6 +494,10 @@ def export_pdf_com(
                 Visible=False,
                 ConfirmConversions=False,
             )
+            try:
+                doc.Fields.Update()
+            except Exception:
+                pass
             doc.ExportAsFixedFormat(
                 OutputFileName=str(tmp_dst),
                 ExportFormat=wdExportFormatPDF,

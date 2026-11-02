@@ -472,18 +472,32 @@ def run_pipeline(
                 continue
 
             try:
+                toc_cfg = options.toc
+                src_engine_kind = kind_of(src)
+                if (
+                    options.toc.page_mode == PageMode.STATIC_MEASURED
+                    and src_engine_kind == "wincom"
+                ):
+                    # Word COM 原生单遍直出：无需植入 WDTTAG 隐藏测量锚点，保持书签纯净
+                    from dataclasses import replace
+                    toc_cfg = replace(options.toc, page_mode=PageMode.STATIC_RESTART)
+
                 report: TocReport = inject_toc(
-                    src, options.toc, seven_zip=seven_zip_path
+                    src, toc_cfg, seven_zip=seven_zip_path
                 )
 
                 measure_msg = ""
                 if options.toc.page_mode == PageMode.STATIC_MEASURED:
-                    # 测量引擎与该文件最终渲染引擎严格一致（全生命周期绑定）
-                    measure_runner = get_runner(kind_of(src))
-                    succ, final_pages, measure_msg = _perform_page_measurement(
-                        src, report, options.toc, measure_runner, seven_zip_path=seven_zip_path
-                    )
-                    report.pages = final_pages
+                    if src_engine_kind == "wincom":
+                        # Word COM 原生支持导出时流式刷新域（doc.Fields.Update），
+                        # 避免超大文档进行 2-Pass 冗余临时 PDF 测算，实现单遍高效直出。
+                        measure_msg = "Word COM 原生单遍直出"
+                    else:
+                        measure_runner = get_runner(src_engine_kind)
+                        succ, final_pages, measure_msg = _perform_page_measurement(
+                            src, report, options.toc, measure_runner, seven_zip_path=seven_zip_path
+                        )
+                        report.pages = final_pages
 
                 pages_summary = (
                     f"{report.pages}"
@@ -589,16 +603,30 @@ def run_pipeline(
                 continue
 
             try:
-                report = inject_toc(d, options.toc, seven_zip=seven_zip_path)
+                toc_cfg = options.toc
+                orig_engine_kind = kind_of(orig_src)
+                if (
+                    options.toc.page_mode == PageMode.STATIC_MEASURED
+                    and orig_engine_kind == "wincom"
+                ):
+                    # Word COM 原生单遍直出：无需植入 WDTTAG 隐藏测量锚点，保持书签纯净
+                    from dataclasses import replace
+                    toc_cfg = replace(options.toc, page_mode=PageMode.STATIC_RESTART)
+
+                report = inject_toc(d, toc_cfg, seven_zip=seven_zip_path)
 
                 measure_msg = ""
                 if options.toc.page_mode == PageMode.STATIC_MEASURED:
-                    # 测量引擎与该文件最终渲染引擎严格一致（全生命周期绑定）
-                    measure_runner = get_runner(kind_of(orig_src))
-                    succ, final_pages, measure_msg = _perform_page_measurement(
-                        d, report, options.toc, measure_runner, seven_zip_path=seven_zip_path
-                    )
-                    report.pages = final_pages
+                    if orig_engine_kind == "wincom":
+                        # Word COM 原生支持导出时流式刷新域（doc.Fields.Update），
+                        # 避免超大文档进行 2-Pass 冗余临时 PDF 测算，实现单遍高效直出。
+                        measure_msg = "Word COM 原生单遍直出"
+                    else:
+                        measure_runner = get_runner(orig_engine_kind)
+                        succ, final_pages, measure_msg = _perform_page_measurement(
+                            d, report, options.toc, measure_runner, seven_zip_path=seven_zip_path
+                        )
+                        report.pages = final_pages
 
                 injected_docxs.append((orig_src, d))
                 msg = f"条目: {report.entries}, 耗时: {report.elapsed:.2f}s"

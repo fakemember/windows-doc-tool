@@ -190,3 +190,139 @@ def test_pipeline_force_and_skip(tmp_path: Path):
     res3 = run_pipeline([doc_path], opt_force)
     assert not any(e.status == "skipped" for e in res3)
     assert all(e.status == "ok" for e in res3)
+
+
+# ---------------------------------------------------------------------------
+# 双引擎路由 (auto 仲裁 / 规则 C / 显式引擎 / wincom 旁路 measured 2-Pass)
+# ---------------------------------------------------------------------------
+
+_FAKE_LO_ENGINE = Engine(soffice=Path("/usr/bin/soffice"), source="path", version=(26, 0))
+
+
+def _make_fake_runner() -> MagicMock:
+    """构造行为与真实 Runner 一致的假调度器：写占位产物并按序上报进度。"""
+    runner = MagicMock()
+
+    def _convert(pairs, target, gray=False, progress_cb=None, should_cancel=None):
+        results = []
+        for i, (src, dst) in enumerate(pairs, 1):
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(b"wdt-fake-output")
+            res = FileResult(src=src, dst=dst, ok=True, elapsed=0.1, error="")
+            results.append(res)
+            if progress_cb:
+                progress_cb(i, len(pairs), res)
+        return results
+
+    runner.convert.side_effect = _convert
+    return runner
+
+
+def _patch_runners(monkeypatch) -> tuple[MagicMock, MagicMock]:
+    """替换 pipeline 内的双引擎 Runner 与支持探测，返回 (lo_runner, wc_runner)。"""
+    lo_runner = _make_fake_runner()
+    wc_runner = _make_fake_runner()
+    monkeypatch.setattr(
+        "wdt.pipeline.BatchRunner", lambda engine=None, jobs=None: lo_runner
+    )
+    monkeypatch.setattr("wdt.pipeline.WincomRunner", lambda: wc_runner)
+    monkeypatch.setattr("wdt.pipeline.is_wincom_supported", lambda: True)
+    return lo_runner, wc_runner
+
+
+def test_pipeline_auto_rule_c_upgrades_batch(tmp_path: Path, monkeypatch):
+    """规则 C：任务含 PDF 导出时，批内任一文件仲裁为 wincom 则整批统一升级。"""
+    small = tmp_path / "table.doc"
+    small.write_bytes(b"a" * 10)
+    big = tmp_path / "listing.rtf"
+    big.write_bytes(b"b" * 2000)
+
+    lo_runner, wc_runner = _patch_runners(monkeypatch)
+    monkeypatch.setattr(
+        "wdt.pipeline.arbitrate_engine",
+        lambda **kw: "wincom" if kw["file_bytes"] > 1000 else "libreoffice",
+    )
+
+    opt = PipelineOptions(
+        mode="convert", make_docx=True, make_pdf=True, engine_mode="auto"
+    )
+    events = run_pipeline([small, big], opt, engine=_FAKE_LO_ENGINE)
+
+    assert wc_runner.convert.call_count == 2
+    for call in wc_runner.convert.call_args_list:
+        assert len(call.args[0]) == 2
+    assert lo_runner.convert.call_count == 0
+    assert any("[Word COM]" in e.message for e in events)
+    assert all(e.status == "ok" for e in events)
+
+
+def test_pipeline_auto_split_groups_and_skip_wincom_normalize(
+    tmp_path: Path, monkeypatch
+):
+    """auto 仅转 DOCX：按文件分组路由，wincom 产物跳过 LibreOffice 专用规范化。"""
+    small = tmp_path / "table.doc"
+    small.write_bytes(b"a" * 10)
+    big = tmp_path / "listing.rtf"
+    big.write_bytes(b"b" * 2000)
+
+    lo_runner, wc_runner = _patch_runners(monkeypatch)
+    monkeypatch.setattr(
+        "wdt.pipeline.arbitrate_engine",
+        lambda **kw: "wincom" if kw["file_bytes"] > 1000 else "libreoffice",
+    )
+
+    opt = PipelineOptions(
+        mode="convert", make_docx=True, make_pdf=False, engine_mode="auto"
+    )
+    with patch("wdt.pipeline._safe_normalize_converted") as mock_norm:
+        events = run_pipeline([small, big], opt, engine=_FAKE_LO_ENGINE)
+
+    lo_pairs = lo_runner.convert.call_args_list[0].args[0]
+    wc_pairs = wc_runner.convert.call_args_list[0].args[0]
+    assert [p[0] for p in lo_pairs] == [small]
+    assert [p[0] for p in wc_pairs] == [big]
+    assert mock_norm.call_count == 1
+    assert any("[LibreOffice]" in e.message for e in events)
+    assert any("[Word COM]" in e.message for e in events)
+    assert all(e.status == "ok" for e in events)
+
+
+def test_pipeline_explicit_wincom_unsupported_raises(tmp_path: Path, monkeypatch):
+    """显式指定 wincom 但环境不支持时必须直接报错，不静默回退。"""
+    doc = tmp_path / "a.doc"
+    doc.write_bytes(b"x")
+    monkeypatch.setattr("wdt.pipeline.is_wincom_supported", lambda: False)
+
+    opt = PipelineOptions(mode="convert", make_docx=True, engine_mode="wincom")
+    with pytest.raises(ValueError, match="wincom"):
+        run_pipeline([doc], opt)
+
+
+def test_pipeline_wincom_bypasses_2pass_measured(tmp_path: Path, monkeypatch):
+    """测试 wincom 引擎自动 bypass measured 临时 PDF 测算，避免超大文件 2-Pass 冗余耗时。"""
+    doc = tmp_path / "fast_m.docx"
+    build_docx(doc, paragraphs=[{"text": "H1", "outline": 0, "pstyle": "Heading1"}])
+
+    wc_runner = _make_fake_runner()
+    monkeypatch.setattr("wdt.pipeline.WincomRunner", lambda: wc_runner)
+    monkeypatch.setattr("wdt.pipeline.is_wincom_supported", lambda: True)
+
+    with patch("wdt.pipeline._perform_page_measurement") as mock_measure:
+        opt = PipelineOptions(
+            mode="toc",
+            toc=TocConfig(depth=1, page_mode=PageMode.STATIC_MEASURED),
+            engine_mode="wincom",
+        )
+        events = run_pipeline([doc], opt)
+
+        # 确保没有调用 2-Pass 临时 PDF 测算函数
+        mock_measure.assert_not_called()
+        assert events[0].stage == Stage.TOC
+        assert events[0].status == "ok"
+        assert "单遍直出" in events[0].message
+
+        # 验证段落中没有注入 WDTTAG 隐藏锚点（书签保持纯净）
+        import zipfile
+        with zipfile.ZipFile(doc, "r") as zf:
+            xml_content = zf.read("word/document.xml").decode("utf-8")
+        assert "WDTTAG" not in xml_content

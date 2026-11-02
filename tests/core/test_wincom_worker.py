@@ -213,6 +213,7 @@ def test_export_pdf_com_parameters(tmp_path: Path):
         assert res.ok is True
         assert res.dst == dst_pdf
         assert dst_pdf.is_file()
+        assert mock_doc.Fields.Update.called  # 验证导出前刷新动态域
 
         export_call = mock_doc.ExportAsFixedFormat.call_args
         assert export_call.kwargs["ExportFormat"] == wdExportFormatPDF
