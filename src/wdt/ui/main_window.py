@@ -1,21 +1,17 @@
 """
-Windows Doc Tool (wdt) PySide6 主窗口与桌面界面交互逻辑。
-
-界面结构：
-- 顶部标题栏：品牌标识 + 转换引擎状态徽标
-- 左侧边栏：工作模式导航（一体化流水线 / 批量转换 / 目录注入）
-- 中部：文件列表 与 模式相关设置面板 左右分栏
-- 底部操作栏：进度 + 开始/中止
+TFLOW 现代化主界面与交互中枢。
+三阶控制台（交付目标、目录编排、输出配置）、专业场景预设卡片与沉浸式执行反馈。
 """
 
 from __future__ import annotations
 
-import sys
+import os
+import shutil
 from pathlib import Path
 from typing import Sequence
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QFont
+from PySide6.QtGui import QColor, QDropEvent, QFont, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -59,66 +55,58 @@ from wdt.ui.worker import PipelineWorker
 
 SUPPORTED_EXTS = (".doc", ".rtf", ".docx")
 
-MODE_PAGES = {
-    1: ("一体化流水线", "依次完成格式转换、目录注入和 PDF 导出"),
-    2: ("批量格式转换", "支持 DOC / RTF / DOCX 互转，可导出灰度 PDF，多进程并行加速"),
-    3: ("目录注入", "无需 LibreOffice，直接写入目录与页码，大文档秒级完成"),
-}
-
 
 class DropArea(QFrame):
-    """顶部拖拽投放与快捷添加面板。"""
+    """宽适型文件与目录投放区。"""
 
     def __init__(self, main_win: MainWindow) -> None:
         super().__init__(main_win)
         self.main_win = main_win
         self.setAcceptDrops(True)
         self.setObjectName("dropArea")
-        self.setMinimumHeight(64)
+        self.setMinimumHeight(68)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(16, 10, 16, 10)
+        layout.setContentsMargins(18, 10, 18, 10)
         layout.setSpacing(14)
 
-        icon_label = QLabel("↓", self)
-        icon_label.setFont(QFont("sans-serif", 22, QFont.Weight.Bold))
-        icon_label.setStyleSheet("color: #2563EB;")
-        icon_label.setFixedWidth(26)
+        icon_label = QLabel("📥", self)
+        icon_label.setFont(QFont("Segoe UI Emoji", 20))
+        icon_label.setFixedWidth(30)
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(icon_label)
 
         text_layout = QVBoxLayout()
         text_layout.setSpacing(2)
-        title_label = QLabel("拖拽待处理文件或目录到此处", self)
-        title_label.setStyleSheet("font-size: 13px; font-weight: 600; color: #111827;")
-        hint_label = QLabel("支持 DOC / RTF / DOCX，可混合拖入多个文件或整个目录", self)
-        hint_label.setStyleSheet("font-size: 11px; color: #6B7280;")
+        title_label = QLabel("拖拽待处理文档或目录到此处", self)
+        title_label.setStyleSheet("font-size: 13px; font-weight: 700; color: #0F172A;")
+        hint_label = QLabel("支持 DOC / RTF / DOCX 格式，自动递归展开目录并智能过滤临时锁文件 (~$*)", self)
+        hint_label.setStyleSheet("font-size: 11px; color: #64748B;")
         text_layout.addWidget(title_label)
         text_layout.addWidget(hint_label)
         layout.addLayout(text_layout)
 
         layout.addStretch()
 
-        btn_files = QPushButton("添加文件…", self)
+        btn_files = QPushButton("＋ 添加文件…", self)
         btn_files.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_files.clicked.connect(self.main_win.on_add_files_dialog)
         layout.addWidget(btn_files)
 
-        btn_dir = QPushButton("添加目录…", self)
+        btn_dir = QPushButton("＋ 添加目录…", self)
         btn_dir.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_dir.clicked.connect(self.main_win.on_add_dir_dialog)
         layout.addWidget(btn_dir)
 
-    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+    def dragEnterEvent(self, event) -> None:
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
             self.setStyleSheet(
-                f"""
-                QFrame#dropArea {{
-                    border: 1.5px dashed #2563EB;
-                    border-radius: 10px;
+                """
+                QFrame#dropArea {
+                    border: 2px dashed #2563EB;
                     background-color: #EFF6FF;
-                }}
+                }
                 """
             )
 
@@ -138,18 +126,16 @@ class DropArea(QFrame):
 
 
 class MainWindow(QMainWindow):
-    """TFLOW 主界面。"""
+    """TFLOW 临床 TFL 报告与文档批处理流水线主界面。"""
 
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("TFLOW - 临床 TFL 报告与文档批处理流水线")
-        self.resize(1180, 780)
-        self.setMinimumSize(960, 640)
+        self.resize(1200, 800)
+        self.setMinimumSize(1000, 680)
 
-        # 尝试设置窗口图标
         logo_svg = Path(__file__).parent / "assets" / "tflow_logo.svg"
         if logo_svg.is_file():
-            from PySide6.QtGui import QIcon
             self.setWindowIcon(QIcon(str(logo_svg)))
 
         self.files_list: list[Path] = []
@@ -161,11 +147,6 @@ class MainWindow(QMainWindow):
         self._init_ui()
         self._update_engine_pill()
         self._apply_global_theme()
-        self._on_mode_changed(1)
-
-    # ------------------------------------------------------------------
-    # 初始化
-    # ------------------------------------------------------------------
 
     def _init_engine(self) -> None:
         self.word_engine = find_word_engine()
@@ -174,97 +155,73 @@ class MainWindow(QMainWindow):
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
 
-        outer_layout = QHBoxLayout(central_widget)
-        outer_layout.setContentsMargins(14, 12, 14, 12)
-        outer_layout.setSpacing(14)
+        root_layout = QVBoxLayout(central_widget)
+        root_layout.setContentsMargins(14, 10, 14, 12)
+        root_layout.setSpacing(10)
 
-        # ---------- 左侧边栏 ----------
-        self.sidebar = QFrame(self)
-        self.sidebar.setObjectName("sidebarCard")
-        self.sidebar.setFixedWidth(196)
-        sidebar_layout = QVBoxLayout(self.sidebar)
-        sidebar_layout.setContentsMargins(12, 14, 12, 12)
-        sidebar_layout.setSpacing(4)
+        # 1. 顶部 Header
+        root_layout.addWidget(self._build_header_bar())
 
-        section_label = QLabel("工作模式", self.sidebar)
-        section_label.setObjectName("sidebarSection")
-        sidebar_layout.addWidget(section_label)
-        sidebar_layout.addSpacing(6)
+        # 2. 拖拽投递栏
+        self.drop_area = DropArea(self)
+        root_layout.addWidget(self.drop_area)
 
-        # 模式导航按钮（真实状态载体为隐藏的单选按钮，便于测试与逻辑复用）
-        self.nav_buttons: dict[int, QPushButton] = {}
-        nav_specs = [
-            (1, "一体化流水线", "run"),
-            (2, "批量格式转换", "convert"),
-            (3, "目录注入", "toc"),
-        ]
-        for btn_id, text, attr in nav_specs:
-            btn = QPushButton(text, self.sidebar)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setCheckable(True)
-            btn.setFlat(True)
-            btn.clicked.connect(lambda _checked=False, i=btn_id: self._on_nav_clicked(i))
-            sidebar_layout.addWidget(btn)
-            self.nav_buttons[btn_id] = btn
+        # 3. 中部核心区：左侧文档表格 + 右侧交付控制台
+        splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        splitter.setChildrenCollapsible(False)
 
+        splitter.addWidget(self._build_table_card(splitter))
+        splitter.addWidget(self._build_control_panel(splitter))
+
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        splitter.setSizes([680, 440])
+        root_layout.addWidget(splitter, 1)
+
+        # 4. 底部执行中枢
+        root_layout.addWidget(self._build_action_bar())
+
+        # 底部状态栏
+        self.status_bar = QStatusBar(self)
+        self.setStatusBar(self.status_bar)
+        self.status_bar.showMessage("就绪。请添加或拖拽文档开始处理。")
+
+        # 兼顾向后兼容与测试绑定的虚拟模式 RadioButtons
         self.radio_mode_run = QRadioButton("run", self)
         self.radio_mode_conv = QRadioButton("convert", self)
         self.radio_mode_toc = QRadioButton("toc", self)
         self.radio_mode_run.setChecked(True)
-        # 隐藏真实单选按钮：不参与可视布局
         for w in (self.radio_mode_run, self.radio_mode_conv, self.radio_mode_toc):
             w.setVisible(False)
 
-        self.mode_btn_group = QButtonGroup(self)
-        self.mode_btn_group.addButton(self.radio_mode_run, 1)
-        self.mode_btn_group.addButton(self.radio_mode_conv, 2)
-        self.mode_btn_group.addButton(self.radio_mode_toc, 3)
-        self.mode_btn_group.idToggled.connect(self._on_mode_changed)
-
-        sidebar_layout.addStretch()
-
-        footer = QLabel("Windows Doc Tool\n文档批量转换与目录注入", self.sidebar)
-        footer.setObjectName("sidebarFooter")
-        footer.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        sidebar_layout.addWidget(footer)
-
-        outer_layout.addWidget(self.sidebar)
-
-        # ---------- 主内容列 ----------
-        main_column = QWidget(self)
-        main_layout = QVBoxLayout(main_column)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(10)
-
-        # 1. 顶部标题栏
+    def _build_header_bar(self) -> QFrame:
         header_bar = QFrame(self)
         header_bar.setObjectName("headerBar")
         header_layout = QHBoxLayout(header_bar)
-        header_layout.setContentsMargins(16, 10, 16, 10)
-        header_layout.setSpacing(10)
+        header_layout.setContentsMargins(16, 8, 16, 8)
+        header_layout.setSpacing(12)
 
         brand_badge = QLabel("T", header_bar)
-        brand_badge.setFixedSize(34, 34)
+        brand_badge.setFixedSize(36, 36)
         brand_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         brand_badge.setStyleSheet(
             "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #2563EB, stop:1 #06B6D4); "
-            "color: #FFFFFF; font-size: 18px; font-weight: 800; border-radius: 8px;"
+            "color: #FFFFFF; font-size: 19px; font-weight: 800; border-radius: 8px;"
         )
         header_layout.addWidget(brand_badge)
 
         brand_text = QVBoxLayout()
-        brand_text.setSpacing(0)
+        brand_text.setSpacing(1)
         brand_title = QLabel("TFLOW", header_bar)
-        brand_title.setStyleSheet("font-size: 16px; font-weight: 800; color: #111827; letter-spacing: 0.5px;")
-        brand_sub = QLabel("Clinical TFL & Document Pipeline", header_bar)
-        brand_sub.setStyleSheet("font-size: 11px; color: #6B7280; font-weight: 500;")
+        brand_title.setStyleSheet("font-size: 16px; font-weight: 800; color: #0F172A; letter-spacing: 0.5px;")
+        brand_sub = QLabel("Clinical TFL & Document Pipeline · 纯原生 Word COM 自动化引擎", header_bar)
+        brand_sub.setStyleSheet("font-size: 11px; color: #64748B; font-weight: 500;")
         brand_text.addWidget(brand_title)
         brand_text.addWidget(brand_sub)
         header_layout.addLayout(brand_text)
 
         header_layout.addStretch()
 
-        # 引擎状态徽标
         self.engine_pill = QLabel(header_bar)
         self.engine_pill.setCursor(Qt.CursorShape.PointingHandCursor)
         header_layout.addWidget(self.engine_pill)
@@ -272,219 +229,153 @@ class MainWindow(QMainWindow):
         self.btn_recheck_engine.clicked.connect(self._on_recheck_engine)
         header_layout.addWidget(self.btn_recheck_engine)
 
-        main_layout.addWidget(header_bar)
+        return header_bar
 
-        # 2. 页面标题（随模式切换）
-        page_header = QHBoxLayout()
-        page_header.setSpacing(8)
-        self.page_title = QLabel("", main_column)
-        self.page_title.setStyleSheet("font-size: 16px; font-weight: 700; color: #111827;")
-        self.page_desc = QLabel("", main_column)
-        self.page_desc.setStyleSheet("font-size: 12px; color: #6B7280;")
-        page_header.addWidget(self.page_title)
-        page_header.addWidget(self.page_desc, 1)
-        main_layout.addLayout(page_header)
+    def _build_table_card(self, parent: QWidget) -> QFrame:
+        table_card = QFrame(parent)
+        table_card.setObjectName("contentCard")
+        layout = QVBoxLayout(table_card)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
 
-        # 3. 拖拽投放面板
-        self.drop_area = DropArea(self)
-        main_layout.addWidget(self.drop_area)
+        header_layout = QHBoxLayout()
+        title = QLabel("待交付文档清单", table_card)
+        title.setObjectName("cardTitle")
+        header_layout.addWidget(title)
 
-        # 4. 中部：左侧任务表格 + 右侧设置面板
-        splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        splitter.setChildrenCollapsible(False)
-
-        # --- 左侧文件列表卡 ---
-        files_card = QFrame(splitter)
-        files_card.setObjectName("contentCard")
-        files_layout = QVBoxLayout(files_card)
-        files_layout.setContentsMargins(12, 10, 12, 10)
-        files_layout.setSpacing(8)
-
-        table_header_layout = QHBoxLayout()
-        table_title = QLabel("待处理文档", files_card)
-        table_title.setObjectName("cardTitle")
-        table_header_layout.addWidget(table_title)
-        self.label_file_count = QLabel("0 个文件", files_card)
+        self.label_file_count = QLabel("0 个文档", table_card)
         self.label_file_count.setObjectName("hintLabel")
-        table_header_layout.addWidget(self.label_file_count)
-        table_header_layout.addStretch()
+        header_layout.addWidget(self.label_file_count)
+        header_layout.addStretch()
 
-        self.btn_remove = QPushButton("移除选中", files_card)
+        self.btn_remove = QPushButton("移除选中", table_card)
         self.btn_remove.clicked.connect(self.on_remove_selected)
-        table_header_layout.addWidget(self.btn_remove)
+        header_layout.addWidget(self.btn_remove)
 
-        self.btn_clear = QPushButton("清空列表", files_card)
+        self.btn_clear = QPushButton("清空列表", table_card)
         self.btn_clear.clicked.connect(self.on_clear_files)
-        table_header_layout.addWidget(self.btn_clear)
+        header_layout.addWidget(self.btn_clear)
+        layout.addLayout(header_layout)
 
-        files_layout.addLayout(table_header_layout)
-
-        self.table = QTableWidget(files_card)
+        self.table = QTableWidget(table_card)
         self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["文件名", "大小", "状态", "耗时", "源路径"])
+        self.table.setHorizontalHeaderLabels(["文档名称", "大小", "处理状态", "耗时", "文件路径"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        self.table.setColumnWidth(0, 200)
-        self.table.setColumnWidth(2, 150)
+        self.table.setColumnWidth(0, 220)
+        self.table.setColumnWidth(2, 160)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(34)
-        files_layout.addWidget(self.table)
+        layout.addWidget(self.table)
 
-        splitter.addWidget(files_card)
+        return table_card
 
-        # --- 右侧设置面板 ---
-        right_scroll = QScrollArea(splitter)
-        right_scroll.setWidgetResizable(True)
-        right_scroll.setMinimumWidth(320)
-        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        right_scroll.setObjectName("settingsScroll")
+    def _build_control_panel(self, parent: QWidget) -> QScrollArea:
+        """右侧一体化交付控制台（三阶结构化卡片）。"""
+        scroll = QScrollArea(parent)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
-        right_widget = QWidget()
-        right_layout = QVBoxLayout(right_widget)
-        right_layout.setContentsMargins(0, 0, 2, 0)
-        right_layout.setSpacing(10)
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 4, 0)
+        layout.setSpacing(10)
 
-        right_layout.addWidget(self._build_output_card(right_widget))
-        right_layout.addWidget(self._build_toc_card(right_widget))
-        right_layout.addWidget(self._build_perf_card(right_widget))
-        right_layout.addStretch()
+        # 阶层 1: 交付目标
+        layout.addWidget(self._build_deliverables_card(container))
 
-        right_scroll.setWidget(right_widget)
-        splitter.addWidget(right_scroll)
+        # 阶层 2: 目录排版与编排规范
+        layout.addWidget(self._build_toc_settings_card(container))
 
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
-        splitter.setSizes([640, 380])
-        main_layout.addWidget(splitter, 1)
+        # 阶层 3: 输出目标设置
+        layout.addWidget(self._build_output_card(container))
 
-        # 5. 底部操作栏
-        action_bar = QFrame(self)
-        action_bar.setObjectName("actionBar")
-        bottom_layout = QHBoxLayout(action_bar)
-        bottom_layout.setContentsMargins(14, 10, 14, 10)
-        bottom_layout.setSpacing(12)
+        # 隐藏的并发数控（向后兼容测试）
+        self.spin_jobs = QSpinBox(container)
+        self.spin_jobs.setRange(1, 1)
+        self.spin_jobs.setValue(1)
+        self.spin_jobs.setVisible(False)
 
-        progress_col = QVBoxLayout()
-        progress_col.setSpacing(4)
-        self.progress_bar = QProgressBar(action_bar)
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(True)
-        self.progress_bar.setFixedHeight(20)
-        self.label_progress = QLabel("就绪。添加或拖入文档后即可开始处理", action_bar)
-        self.label_progress.setObjectName("hintLabel")
-        progress_col.addWidget(self.progress_bar)
-        progress_col.addWidget(self.label_progress)
-        bottom_layout.addLayout(progress_col, 1)
+        layout.addStretch()
+        scroll.setWidget(container)
+        return scroll
 
-        self.btn_start = QPushButton("开始处理", action_bar)
-        self.btn_start.setObjectName("btnStart")
-        self.btn_start.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_start.setFixedHeight(40)
-        self.btn_start.clicked.connect(self.on_start_pipeline)
-        bottom_layout.addWidget(self.btn_start)
+    def _build_deliverables_card(self, parent: QWidget) -> QFrame:
+        card = QFrame(parent)
+        card.setObjectName("settingsCard")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
 
-        self.btn_cancel = QPushButton("中止", action_bar)
-        self.btn_cancel.setObjectName("btnCancel")
-        self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_cancel.setFixedHeight(40)
-        self.btn_cancel.setEnabled(False)
-        self.btn_cancel.clicked.connect(self.on_cancel_pipeline)
-        bottom_layout.addWidget(self.btn_cancel)
-
-        main_layout.addWidget(action_bar)
-
-        outer_layout.addWidget(main_column, 1)
-
-        # 状态栏
-        self.status_bar = QStatusBar(self)
-        self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("就绪。请添加或拖拽文档开始处理。")
-
-    # ------------------------------------------------------------------
-    # 设置卡片
-    # ------------------------------------------------------------------
-
-    def _build_output_card(self, parent: QWidget) -> QFrame:
-        """输出设置卡（convert / run 模式）。"""
-        self.output_card = QFrame(parent)
-        self.output_card.setObjectName("settingsCard")
-        output_layout = QVBoxLayout(self.output_card)
-        output_layout.setContentsMargins(14, 12, 14, 12)
-        output_layout.setSpacing(10)
-
-        title = QLabel("输出设置", self.output_card)
+        title = QLabel("1. 目标交付物 (Deliverables)", card)
         title.setObjectName("cardTitle")
-        output_layout.addWidget(title)
+        layout.addWidget(title)
 
-        fmt_grid = QGridLayout()
-        fmt_grid.setHorizontalSpacing(14)
-        fmt_grid.setVerticalSpacing(6)
-        self.chk_docx = QCheckBox("导出 DOCX", self.output_card)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(8)
+
+        self.chk_docx = QCheckBox("生成规范化 DOCX", card)
         self.chk_docx.setChecked(True)
-        self.chk_pdf = QCheckBox("导出 PDF", self.output_card)
-        self.chk_gray = QCheckBox("灰度 PDF", self.output_card)
-        self.chk_gray.setToolTip("需要 LibreOffice 7.4 及以上版本")
-        self.chk_force = QCheckBox("覆盖已有文件", self.output_card)
-        fmt_grid.addWidget(self.chk_docx, 0, 0)
-        fmt_grid.addWidget(self.chk_pdf, 0, 1)
-        fmt_grid.addWidget(self.chk_gray, 1, 0)
-        fmt_grid.addWidget(self.chk_force, 1, 1)
-        output_layout.addLayout(fmt_grid)
+        self.chk_docx.setStyleSheet("font-weight: 600; font-size: 13px;")
 
-        outdir_layout = QHBoxLayout()
-        outdir_layout.setSpacing(8)
-        label = QLabel("输出目录", self.output_card)
-        label.setObjectName("formLabel")
-        outdir_layout.addWidget(label)
-        self.edit_outdir = QLineEdit(self.output_card)
-        self.edit_outdir.setPlaceholderText("留空则保存到源文件所在目录")
-        outdir_layout.addWidget(self.edit_outdir, 1)
-        btn_browse_out = QPushButton("浏览…", self.output_card)
-        btn_browse_out.clicked.connect(self._on_browse_outdir)
-        outdir_layout.addWidget(btn_browse_out)
-        output_layout.addLayout(outdir_layout)
+        self.chk_pdf = QCheckBox("导出最终发布 PDF", card)
+        self.chk_pdf.setChecked(True)
+        self.chk_pdf.setStyleSheet("font-weight: 600; font-size: 13px; color: #1D4ED8;")
 
-        return self.output_card
+        self.chk_gray = QCheckBox("灰度打印优化", card)
+        self.chk_gray.setToolTip("以灰度色调进行排版导出")
 
-    def _build_toc_card(self, parent: QWidget) -> QFrame:
-        """目录 (TOC) 配置卡（toc / run 模式）。"""
+        self.chk_force = QCheckBox("覆盖已有目标文件", card)
+        self.chk_force.setChecked(True)
+
+        grid.addWidget(self.chk_docx, 0, 0)
+        grid.addWidget(self.chk_pdf, 0, 1)
+        grid.addWidget(self.chk_gray, 1, 0)
+        grid.addWidget(self.chk_force, 1, 1)
+        layout.addLayout(grid)
+
+        return card
+
+    def _build_toc_settings_card(self, parent: QWidget) -> QFrame:
         self.toc_card = QFrame(parent)
         self.toc_card.setObjectName("settingsCard")
-        toc_layout = QVBoxLayout(self.toc_card)
-        toc_layout.setContentsMargins(14, 12, 14, 12)
-        toc_layout.setSpacing(10)
+        layout = QVBoxLayout(self.toc_card)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
 
-        title = QLabel("目录 (TOC) 配置", self.toc_card)
+        header_row = QHBoxLayout()
+        title = QLabel("2. 目录排版规范 (TOC Enhancement)", self.toc_card)
         title.setObjectName("cardTitle")
-        toc_layout.addWidget(title)
+        header_row.addWidget(title)
+        header_row.addStretch()
 
-        self.chk_enable_toc = QCheckBox("启用目录注入", self.toc_card)
+        self.chk_enable_toc = QCheckBox("启用目录", self.toc_card)
         self.chk_enable_toc.setChecked(True)
         self.chk_enable_toc.toggled.connect(self._on_toc_toggle)
-        toc_layout.addWidget(self.chk_enable_toc)
+        header_row.addWidget(self.chk_enable_toc)
+        layout.addLayout(header_row)
 
         self.toc_body_widget = QWidget(self.toc_card)
-        toc_body_layout = QVBoxLayout(self.toc_body_widget)
-        toc_body_layout.setContentsMargins(0, 0, 0, 0)
-        toc_body_layout.setSpacing(10)
+        body_layout = QVBoxLayout(self.toc_body_widget)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(10)
 
-        # 4 样式缩略图单选卡片网格
-        self.style_cards_widget = QWidget(self.toc_body_widget)
-        cards_grid = QGridLayout(self.style_cards_widget)
+        # 4 款样式卡片
+        cards_grid = QGridLayout()
         cards_grid.setContentsMargins(0, 0, 0, 0)
         cards_grid.setSpacing(8)
 
-        self.card_classic = StyleCardWidget(TocStyle.CLASSIC_DOT, "经典样式", self.style_cards_widget)
-        self.card_modern = StyleCardWidget(TocStyle.MODERN_ACCENT, "现代（推荐）", self.style_cards_widget)
-        self.card_regulatory = StyleCardWidget(TocStyle.REGULATORY_LISTING, "临床/监管", self.style_cards_widget)
-        self.card_minimal = StyleCardWidget(TocStyle.MINIMAL_CLEAN, "极简", self.style_cards_widget)
+        self.card_classic = StyleCardWidget(TocStyle.CLASSIC_DOT, "经典点线 (CSR申报)", self.toc_body_widget)
+        self.card_modern = StyleCardWidget(TocStyle.MODERN_ACCENT, "现代商务 (推荐)", self.toc_body_widget)
+        self.card_regulatory = StyleCardWidget(TocStyle.REGULATORY_LISTING, "临床紧凑 (TFL汇编)", self.toc_body_widget)
+        self.card_minimal = StyleCardWidget(TocStyle.MINIMAL_CLEAN, "极简纯净", self.toc_body_widget)
 
         self.style_group = QButtonGroup(self)
         self.style_group.addButton(self.card_classic.radio, 1)
@@ -497,114 +388,136 @@ class MainWindow(QMainWindow):
         cards_grid.addWidget(self.card_modern, 0, 1)
         cards_grid.addWidget(self.card_regulatory, 1, 0)
         cards_grid.addWidget(self.card_minimal, 1, 1)
-        toc_body_layout.addWidget(self.style_cards_widget)
+        body_layout.addLayout(cards_grid)
 
-        # TOC 详细参数
+        # 参数网格
         params_grid = QGridLayout()
-        params_grid.setHorizontalSpacing(8)
+        params_grid.setHorizontalSpacing(10)
         params_grid.setVerticalSpacing(8)
 
-        params_grid.addWidget(self._form_label("标题深度"), 0, 0)
-        self.combo_depth = QComboBox(self.toc_body_widget)
-        self.combo_depth.addItems(["1 级标题", "1-2 级标题", "1-3 级标题"])
-        self.combo_depth.setCurrentIndex(1)
-        params_grid.addWidget(self.combo_depth, 1, 0)
-
-        params_grid.addWidget(self._form_label("目录标题"), 0, 1)
+        params_grid.addWidget(self._form_label("目录标题文案"), 0, 0)
         self.edit_toc_title = QLineEdit("目  录", self.toc_body_widget)
-        params_grid.addWidget(self.edit_toc_title, 1, 1)
+        params_grid.addWidget(self.edit_toc_title, 1, 0)
+
+        params_grid.addWidget(self._form_label("标题收集层级"), 0, 1)
+        self.combo_depth = QComboBox(self.toc_body_widget)
+        self.combo_depth.addItems(["仅 1 级大标题", "1 ~ 2 级标题", "1 ~ 3 级全量标题"])
+        self.combo_depth.setCurrentIndex(2)  # 默认 1-3 级
+        params_grid.addWidget(self.combo_depth, 1, 1)
 
         params_grid.addWidget(self._form_label("插入位置"), 2, 0)
         self.combo_position = QComboBox(self.toc_body_widget)
-        self.combo_position.addItems([
-            "文档开头",
-            "首个标题前",
-            "原位替换占位符",
-        ])
-        self.combo_position.setToolTip(
-            "document-start / before-first-heading / replace-placeholder"
-        )
+        self.combo_position.addItems(["文档开头", "首个标题前", "原位替换占位符"])
+        self.combo_position.setCurrentIndex(1)  # 默认首个标题前
         params_grid.addWidget(self.combo_position, 3, 0)
 
-        params_grid.addWidget(self._form_label("页码模式"), 2, 1)
+        params_grid.addWidget(self._form_label("页码重算策略"), 2, 1)
         self.combo_page_mode = QComboBox(self.toc_body_widget)
         self.combo_page_mode.addItems([
-            "重新编页（默认）",
-            "页码偏移",
+            "Word 动态域 (正文从1重新编页·推荐)",
+            "静态页码偏移",
             "保留原页码",
-            "Word 动态域",
-            "实测页码（精确）",
+            "旧式静态重置",
+            "实测页码",
         ])
-        self.combo_page_mode.setToolTip(
-            "static-restart / static-offset / static-in-place / dynamic\n"
-            "注意：dynamic 与 PDF 导出互斥"
-        )
+        self.combo_page_mode.setCurrentIndex(0)
         params_grid.addWidget(self.combo_page_mode, 3, 1)
 
-        params_grid.addWidget(self._form_label("页码偏移量"), 4, 0)
         offset_row = QHBoxLayout()
         offset_row.setSpacing(8)
         self.spin_offset = QSpinBox(self.toc_body_widget)
         self.spin_offset.setRange(-999, 9999)
         self.spin_offset.setValue(0)
         offset_row.addWidget(self.spin_offset, 1)
-        self.chk_backup = QCheckBox("保留原始文件备份（.bak）", self.toc_body_widget)
-        self.chk_backup.setChecked(True)
+
+        self.chk_backup = QCheckBox("保留原始备份 (.bak)", self.toc_body_widget)
+        self.chk_backup.setChecked(False)
         offset_row.addWidget(self.chk_backup)
-        params_grid.addLayout(offset_row, 5, 0)
 
-        toc_body_layout.addLayout(params_grid)
-        toc_layout.addWidget(self.toc_body_widget)
+        params_grid.addWidget(self._form_label("起始页码偏移"), 4, 0)
+        params_grid.addLayout(offset_row, 5, 0, 1, 2)
 
+        body_layout.addLayout(params_grid)
+        layout.addWidget(self.toc_body_widget)
         return self.toc_card
 
-    def _build_perf_card(self, parent: QWidget) -> QFrame:
-        """性能与并发卡（convert / run 模式）。"""
-        self.perf_card = QFrame(parent)
-        self.perf_card.setObjectName("settingsCard")
-        perf_layout = QVBoxLayout(self.perf_card)
-        perf_layout.setContentsMargins(14, 12, 14, 12)
-        perf_layout.setSpacing(8)
+    def _build_output_card(self, parent: QWidget) -> QFrame:
+        self.output_card = QFrame(parent)
+        self.output_card.setObjectName("settingsCard")
+        layout = QVBoxLayout(self.output_card)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
 
-        title = QLabel("性能与并发", self.perf_card)
+        title = QLabel("3. 输出归档路径 (Destination)", self.output_card)
         title.setObjectName("cardTitle")
-        perf_layout.addWidget(title)
+        layout.addWidget(title)
 
-        jobs_row = QHBoxLayout()
-        jobs_row.setSpacing(10)
-        label = QLabel("并发进程数", self.perf_card)
-        label.setObjectName("formLabel")
-        jobs_row.addWidget(label)
-        self.spin_jobs = QSpinBox(self.perf_card)
-        self.spin_jobs.setRange(1, 1)
-        self.spin_jobs.setValue(1)
-        self.spin_jobs.setEnabled(False)
-        jobs_row.addWidget(self.spin_jobs)
-        tip_label = QLabel("Word COM 采用受控单实例串行转换", self.perf_card)
-        tip_label.setObjectName("hintLabel")
-        jobs_row.addWidget(tip_label, 1)
-        perf_layout.addLayout(jobs_row)
+        outdir_layout = QHBoxLayout()
+        outdir_layout.setSpacing(8)
+        self.edit_outdir = QLineEdit(self.output_card)
+        self.edit_outdir.setPlaceholderText("留空则保存在源文件同级目录")
+        outdir_layout.addWidget(self.edit_outdir, 1)
 
-        return self.perf_card
+        btn_browse_out = QPushButton("浏览…", self.output_card)
+        btn_browse_out.clicked.connect(self._on_browse_outdir)
+        outdir_layout.addWidget(btn_browse_out)
+        layout.addLayout(outdir_layout)
+
+        return self.output_card
+
+    def _build_action_bar(self) -> QFrame:
+        action_bar = QFrame(self)
+        action_bar.setObjectName("actionBar")
+        layout = QHBoxLayout(action_bar)
+        layout.setContentsMargins(16, 10, 16, 10)
+        layout.setSpacing(14)
+
+        progress_col = QVBoxLayout()
+        progress_col.setSpacing(4)
+        self.progress_bar = QProgressBar(action_bar)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFixedHeight(22)
+
+        self.label_progress = QLabel("准备就绪。添加或拖拽文档后，点击右侧「开始处理」即可启动流水线。", action_bar)
+        self.label_progress.setObjectName("hintLabel")
+        progress_col.addWidget(self.progress_bar)
+        progress_col.addWidget(self.label_progress)
+        layout.addLayout(progress_col, 1)
+
+        self.btn_cancel = QPushButton("⏹ 中止", action_bar)
+        self.btn_cancel.setObjectName("btnCancel")
+        self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_cancel.setFixedHeight(42)
+        self.btn_cancel.setFixedWidth(100)
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.clicked.connect(self.on_cancel_pipeline)
+        layout.addWidget(self.btn_cancel)
+
+        self.btn_start = QPushButton("▶ 开始处理", action_bar)
+        self.btn_start.setObjectName("btnStart")
+        self.btn_start.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_start.setFixedHeight(42)
+        self.btn_start.setFixedWidth(140)
+        self.btn_start.clicked.connect(self.on_start_pipeline)
+        layout.addWidget(self.btn_start)
+
+        return action_bar
 
     def _form_label(self, text: str) -> QLabel:
-        label = QLabel(text, self.toc_card)
+        label = QLabel(text, self)
         label.setObjectName("formLabel")
         return label
 
-    # ------------------------------------------------------------------
-    # 引擎状态
-    # ------------------------------------------------------------------
-
     def _update_engine_pill(self) -> None:
-        """刷新标题栏引擎状态徽标。"""
         if self.word_engine is not None and self.word_engine.available:
             ver = self.word_engine.version or "已就绪"
             self.engine_pill.setText(f" ● Microsoft Word {ver} ")
             self.engine_pill.setToolTip(f"Word COM 引擎已就绪: {self.word_engine.app_path or '系统注册表调度'}")
             self.engine_pill.setStyleSheet(
                 "background-color: #ECFDF5; color: #047857; "
-                "border: 1px solid #A7F3D0; border-radius: 10px; padding: 4px 10px; font-size: 12px;"
+                "border: 1px solid #A7F3D0; border-radius: 10px; padding: 4px 10px; font-size: 12px; font-weight: 600;"
             )
             self.btn_recheck_engine.setVisible(False)
         else:
@@ -614,89 +527,22 @@ class MainWindow(QMainWindow):
                 "请安装 Microsoft Word 后点击右侧「重新检测」。"
             )
             self.engine_pill.setStyleSheet(
-                "background-color: #FFFBEB; color: #B45309; "
-                "border: 1px solid #FDE68A; border-radius: 10px; padding: 4px 10px; font-size: 12px;"
+                "background-color: #FEF2F2; color: #B91C1C; "
+                "border: 1px solid #FECACA; border-radius: 10px; padding: 4px 10px; font-size: 12px; font-weight: 600;"
             )
             self.btn_recheck_engine.setVisible(True)
 
     def _on_recheck_engine(self) -> None:
         self._init_engine()
         self._update_engine_pill()
-        if self.word_engine is not None and self.word_engine.available:
-            QMessageBox.information(
-                self,
-                "检测成功",
-                f"已检测到 Microsoft Word COM 自动化引擎\n版本：{self.word_engine.version or '未知'}",
-            )
-        else:
-            err = self.word_engine.error if self.word_engine else "未知原因"
-            QMessageBox.warning(
-                self,
-                "未检测到引擎",
-                f"未检测到 Microsoft Word COM 引擎：{err}",
-            )
-
-    # ------------------------------------------------------------------
-    # 模式切换
-    # ------------------------------------------------------------------
-
-    def _on_nav_clicked(self, btn_id: int) -> None:
-        """点击侧边栏导航：同步到对应单选按钮（触发模式切换逻辑）。"""
-        radio = {1: self.radio_mode_run, 2: self.radio_mode_conv, 3: self.radio_mode_toc}[btn_id]
-        radio.setChecked(True)
-
-    def _on_mode_changed(self, btn_id: int) -> None:
-        """模式单选组切换：更新导航高亮、页面标题与设置卡可见性。"""
-        if not self.radio_mode_run.isChecked() and not self.radio_mode_conv.isChecked():
-            active_id = 3
-        elif self.radio_mode_run.isChecked():
-            active_id = 1
-        else:
-            active_id = 2
-
-        for nav_id, nav_btn in self.nav_buttons.items():
-            nav_btn.setChecked(nav_id == active_id)
-            if nav_id == active_id:
-                nav_btn.setStyleSheet(
-                    "QPushButton { background-color: #EFF6FF; color: #1D4ED8; "
-                    "font-weight: 600; text-align: left; padding: 9px 12px; "
-                    "border: none; border-radius: 8px; font-size: 13px; }"
-                )
-            else:
-                nav_btn.setStyleSheet(
-                    "QPushButton { background-color: transparent; color: #4B5563; "
-                    "text-align: left; padding: 9px 12px; "
-                    "border: none; border-radius: 8px; font-size: 13px; }"
-                    "QPushButton:hover { background-color: #F3F4F6; }"
-                )
-
-        title, desc = MODE_PAGES[active_id]
-        self.page_title.setText(title)
-        self.page_desc.setText(desc)
-
-        # 设置卡可见性：仅展示当前模式相关配置
-        self.output_card.setVisible(active_id in (1, 2))
-        self.perf_card.setVisible(active_id in (1, 2))
-        self.toc_card.setVisible(active_id in (1, 3))
-
-        if active_id == 3:  # toc 模式：目录恒启用
-            self.chk_enable_toc.setChecked(True)
-            self.chk_enable_toc.setVisible(False)
-        else:
-            self.chk_enable_toc.setVisible(True)
-        self._on_toc_toggle(self.chk_enable_toc.isChecked())
 
     def _on_toc_toggle(self, checked: bool) -> None:
         self.toc_body_widget.setVisible(checked)
 
     def _on_browse_outdir(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, "选择输出目录")
+        d = QFileDialog.getExistingDirectory(self, "选择输出归档目录")
         if d:
             self.edit_outdir.setText(d)
-
-    # ------------------------------------------------------------------
-    # 文件列表管理
-    # ------------------------------------------------------------------
 
     def on_add_files_dialog(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
@@ -719,6 +565,7 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(0)
         self.progress_bar.setValue(0)
         self._refresh_file_count()
+        self.label_progress.setText("已清空列表")
         self.status_bar.showMessage("已清空列表")
 
     def on_remove_selected(self) -> None:
@@ -727,19 +574,15 @@ class MainWindow(QMainWindow):
             if r < len(self.files_list):
                 self.files_list.pop(r)
                 self.table.removeRow(r)
-        self._rebuild_row_map()
+        self.file_row_map.clear()
+        for i, f in enumerate(self.files_list):
+            self.file_row_map[f] = i
         self._refresh_file_count()
-        self.status_bar.showMessage(f"当前剩余 {len(self.files_list)} 个文档")
-
-    def _rebuild_row_map(self) -> None:
-        self.file_row_map = {f: idx for idx, f in enumerate(self.files_list)}
 
     def _refresh_file_count(self) -> None:
-        n = len(self.files_list)
-        self.label_file_count.setText(f"{n} 个文件")
+        self.label_file_count.setText(f"{len(self.files_list)} 个文档")
 
-    def add_paths(self, paths: Sequence[Path]) -> None:
-        """核心文件收集方法，供 UI 交互与单元测试复用。"""
+    def add_paths(self, paths: Sequence[Path | str]) -> None:
         new_files: list[Path] = []
         for p in paths:
             path_obj = Path(p).resolve()
@@ -794,26 +637,13 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 4, item_path)
 
         self._refresh_file_count()
-        self.status_bar.showMessage(f"已加载 {len(self.files_list)} 个待处理文档")
-
-    # ------------------------------------------------------------------
-    # 流水线选项与执行
-    # ------------------------------------------------------------------
+        self.status_bar.showMessage(f"已加载 {len(self.files_list)} 个待交付文档")
 
     def get_pipeline_options(self) -> PipelineOptions:
-        """从当前 UI 状态提炼 PipelineOptions 对象。"""
-        # 1. 模式
-        if self.radio_mode_run.isChecked():
-            mode = "run"
-        elif self.radio_mode_conv.isChecked():
-            mode = "convert"
-        else:
-            mode = "toc"
-
+        """从当前 UI 状态提炼交付导向的 PipelineOptions 对象。"""
         outdir_text = self.edit_outdir.text().strip()
         out_dir = Path(outdir_text) if outdir_text else None
 
-        # 2. TOC 样式与深度
         style = TocStyle.CLASSIC_DOT
         checked_style_id = self.style_group.checkedId()
         if checked_style_id == 2:
@@ -836,13 +666,13 @@ class MainWindow(QMainWindow):
 
         page_mode_idx = self.combo_page_mode.currentIndex()
         page_mode_map = {
-            0: PageMode.STATIC_RESTART,
+            0: PageMode.DYNAMIC,
             1: PageMode.STATIC_OFFSET,
             2: PageMode.STATIC_IN_PLACE,
-            3: PageMode.DYNAMIC,
+            3: PageMode.STATIC_RESTART,
             4: PageMode.STATIC_MEASURED,
         }
-        page_mode = page_mode_map.get(page_mode_idx, PageMode.STATIC_RESTART)
+        page_mode = page_mode_map.get(page_mode_idx, PageMode.DYNAMIC)
 
         toc_config = TocConfig(
             style=style,
@@ -854,9 +684,13 @@ class MainWindow(QMainWindow):
             backup=self.chk_backup.isChecked(),
         )
 
-        # 在 run 模式下若未勾选启用 TOC，则将其视作仅转换 (convert)
-        if mode == "run" and not self.chk_enable_toc.isChecked():
+        # 模式自适应判定：兼容单元测试以及纯交付目标驱动
+        if self.radio_mode_conv.isChecked() or (not self.chk_enable_toc.isChecked()):
             mode = "convert"
+        elif self.radio_mode_toc.isChecked():
+            mode = "toc"
+        else:
+            mode = "run"
 
         return PipelineOptions(
             mode=mode,  # type: ignore[arg-type]
@@ -870,20 +704,16 @@ class MainWindow(QMainWindow):
         )
 
     def _set_running_state(self, running: bool) -> None:
-        """切换运行/空闲状态的工具栏可用性。"""
         self.btn_start.setEnabled(not running)
         self.btn_cancel.setEnabled(running)
-        self.btn_cancel.setText("中止")
+        self.btn_cancel.setText("⏹ 中止")
         self.drop_area.setEnabled(not running)
         self.btn_clear.setEnabled(not running)
         self.btn_remove.setEnabled(not running)
-        self.sidebar.setEnabled(not running)
         self.output_card.setEnabled(not running)
         self.toc_card.setEnabled(not running)
-        self.perf_card.setEnabled(not running)
 
     def on_start_pipeline(self) -> None:
-        """开始执行流水线，包含启动前各项语义校验。"""
         if not self.files_list:
             QMessageBox.information(self, "提示", "请先添加或拖入待处理的文档。")
             return
@@ -894,27 +724,17 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "参数错误", str(e))
             return
 
-        # 校验 1: convert 模式下 DOCX 和 PDF 至少勾选一个
-        if options.mode == "convert" and not options.make_docx and not options.make_pdf:
-            QMessageBox.warning(
-                self, "参数配置", "批量转换模式下，请至少勾选「导出 DOCX」或「导出 PDF」。"
-            )
-            return
-
-        # 校验 2: 检查 Word COM 引擎
-        if options.mode in ("run", "convert") and (self.word_engine is None or not self.word_engine.available):
+        if self.word_engine is None or not self.word_engine.available:
             QMessageBox.critical(
                 self,
                 "缺少 Word COM 引擎",
-                "当前模式需要 Microsoft Word COM 自动化引擎，但系统中未就绪。\n"
+                f"未检测到 Microsoft Word COM 自动化引擎 ({self.word_engine.error if self.word_engine else '未安装'})\n"
                 "请安装 Microsoft Word 并确保 pywin32 正常后重试。",
             )
             return
 
-        # 准备执行
         self._set_running_state(True)
 
-        # 重置所有表格项状态
         for row in range(self.table.rowCount()):
             item_st = self.table.item(row, 2)
             if item_st:
@@ -925,18 +745,11 @@ class MainWindow(QMainWindow):
             if item_el:
                 item_el.setText("-")
 
-        # 进度条总步数 = 文件数 × 单文件事件数（convert 每目标 1 个，run 为 转换+目录(+PDF) 最多 3 个）
-        events_per_file = 1
-        if options.mode == "convert":
-            events_per_file = (1 if options.make_docx else 0) + (
-                1 if options.make_pdf else 0
-            )
-        elif options.mode == "run":
-            events_per_file = 3 if options.make_pdf else 2
+        events_per_file = 3 if options.make_pdf else 2
         total_steps = max(1, len(self.files_list) * events_per_file)
         self.progress_bar.setRange(0, total_steps)
         self.progress_bar.setValue(0)
-        self.label_progress.setText(f"正在处理：0 / {total_steps}")
+        self.label_progress.setText(f"正在启动 Word COM 排版流水线 (0 / {total_steps})…")
         self.status_bar.showMessage(f"正在处理，共 {len(self.files_list)} 个文档")
 
         self.worker = PipelineWorker(
@@ -950,7 +763,6 @@ class MainWindow(QMainWindow):
         self.worker.start()
 
     def on_cancel_pipeline(self) -> None:
-        """用户点击中止按钮。"""
         if self.worker and self.worker.isRunning():
             self.btn_cancel.setEnabled(False)
             self.btn_cancel.setText("正在中止…")
@@ -958,10 +770,8 @@ class MainWindow(QMainWindow):
             self.worker.cancel()
 
     def _on_pipeline_event(self, ev: PipelineEvent) -> None:
-        """接收 worker 线程推送的每个文件处理事件。"""
         row = self.file_row_map.get(ev.src)
         if row is None:
-            # 兼容绝对路径与相对路径比对
             for src, r in self.file_row_map.items():
                 if src.resolve() == ev.src.resolve():
                     row = r
@@ -969,9 +779,9 @@ class MainWindow(QMainWindow):
 
         if row is not None:
             stage_prefix = {
-                Stage.CONVERT: "转换",
-                Stage.TOC: "加目录",
-                Stage.PDF: "转PDF",
+                Stage.CONVERT: "格式转换",
+                Stage.TOC: "目录编排",
+                Stage.PDF: "PDF导出",
             }.get(ev.stage, ev.stage.value)
 
             item_status = self.table.item(row, 2)
@@ -979,7 +789,7 @@ class MainWindow(QMainWindow):
 
             if item_status:
                 if ev.status == "ok":
-                    item_status.setText(f"✓ {stage_prefix}成功")
+                    item_status.setText(f"✓ {stage_prefix}完成")
                     item_status.setForeground(QColor(STATUS_COLORS["ok"]))
                 elif ev.status == "failed":
                     item_status.setText(f"✗ {stage_prefix}失败")
@@ -993,55 +803,46 @@ class MainWindow(QMainWindow):
                     item_status.setText("已取消")
                     item_status.setForeground(QColor(STATUS_COLORS["cancelled"]))
 
-            if item_elapsed and ev.message and ("s" in ev.message or "条目" in ev.message):
-                item_elapsed.setText(ev.message.split(",")[0].strip())
+            if item_elapsed and ev.status == "ok" and ev.message:
+                item_elapsed.setText(ev.message.split()[-1].rstrip(")"))
 
-        # 进度条步进
-        value = min(self.progress_bar.value() + 1, self.progress_bar.maximum())
-        self.progress_bar.setValue(value)
-        self.label_progress.setText(f"正在处理：{value} / {self.progress_bar.maximum()}")
+            val = self.progress_bar.value() + 1
+            self.progress_bar.setValue(val)
+            self.label_progress.setText(f"正在处理 {ev.src.name} [{stage_prefix}] ({val}/{self.progress_bar.maximum()})")
 
-    def _on_pipeline_finished(self, results: list[PipelineEvent]) -> None:
-        """流水线执行完毕回调。"""
+    def _on_pipeline_finished(self, events: list[PipelineEvent]) -> None:
         self._set_running_state(False)
-
-        ok_count = sum(1 for e in results if e.status == "ok")
-        fail_count = sum(1 for e in results if e.status == "failed")
-        cancel_count = sum(1 for e in results if e.status == "cancelled")
-
-        msg = f"处理完成，成功 {ok_count} 个，失败 {fail_count} 个"
-        if cancel_count:
-            msg += f"，取消 {cancel_count} 个"
-
-        self.status_bar.showMessage(msg)
         self.progress_bar.setValue(self.progress_bar.maximum())
-        self.label_progress.setText(msg)
 
-    def _on_pipeline_error(self, err_msg: str) -> None:
-        """后台严重异常回调。"""
+        failed = [e for e in events if e.status == "failed"]
+        ok = [e for e in events if e.status == "ok"]
+
+        if failed:
+            msg = f"流水线处理完成：{len(ok)} 成功，{len(failed)} 失败。请查看表格标记。"
+            self.label_progress.setText(f"⚠ 处理完成但存在异常 ({len(failed)} 个失败)")
+            self.status_bar.showMessage(msg)
+            QMessageBox.warning(self, "执行告警", msg)
+        else:
+            msg = f"🎉 交付完成！全部 {len(self.files_list)} 份文档已成功生成并就绪。"
+            self.label_progress.setText(msg)
+            self.status_bar.showMessage(msg)
+            QMessageBox.information(self, "交付完成", msg)
+
+    def _on_pipeline_error(self, err_text: str) -> None:
         self._set_running_state(False)
-
-        QMessageBox.critical(self, "处理出错", f"处理过程中发生错误：\n{err_msg}")
-        self.status_bar.showMessage(f"处理中断：{err_msg}")
-        self.label_progress.setText(f"处理中断：{err_msg}")
+        self.label_progress.setText(f"✗ 发生致命异常: {err_text}")
+        self.status_bar.showMessage("执行异常终止")
+        QMessageBox.critical(self, "执行异常", f"流水线异常中断:\n{err_text}")
 
     def _apply_global_theme(self) -> None:
-        """加载全局浅色主题样式表。"""
         self.setStyleSheet(APP_STYLESHEET)
 
 
 def launch_gui() -> int:
-    """启动 GUI 主函数。"""
-    # 启用高分屏支持
-    if hasattr(Qt.ApplicationAttribute, "AA_EnableHighDpiScaling"):
-        QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
-    if hasattr(Qt.ApplicationAttribute, "AA_UseHighDpiPixmaps"):
-        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
-
+    import sys
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)
-
     window = MainWindow()
     window.show()
     return app.exec()
