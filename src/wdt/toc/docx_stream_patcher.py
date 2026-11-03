@@ -454,7 +454,7 @@ def inject_toc(
     # 8. 计算页码（STATIC_MEASURED 模式先置占位 0，同时准备 break-count 兜底页码）
     break_count_pages = compute_pages(
         doc_bytes=doc_bytes,
-        heading_positions=[h.p_start for h in valid_headings],
+        heading_positions=[(h.p_start, h.p_end) for h in valid_headings],
         insert_pos=insert_pos,
         mode=PageMode.STATIC_RESTART,
         page_offset=config.page_offset,
