@@ -72,7 +72,7 @@ def test_word_session_armor_settings_and_pid_tracking():
     mock_word = MagicMock()
     mock_pythoncom = MagicMock()
     mock_win32com = MagicMock()
-    mock_win32com.client.Dispatch.return_value = mock_word
+    mock_win32com.client.DispatchEx.return_value = mock_word
 
     with patch.object(ww, "is_wincom_supported", return_value=True), \
          patch.object(ww, "pythoncom", mock_pythoncom), \
@@ -84,7 +84,7 @@ def test_word_session_armor_settings_and_pid_tracking():
 
         # 检查 COM 初始化
         mock_pythoncom.CoInitialize.assert_called_once()
-        mock_win32com.client.Dispatch.assert_called_once_with("Word.Application")
+        mock_win32com.client.DispatchEx.assert_called_once_with("Word.Application")
 
         # 检查 PID 捕获
         assert session.pid == 2002

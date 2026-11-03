@@ -3,10 +3,12 @@ from __future__ import annotations
 import csv
 import io
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, Sequence
@@ -204,7 +206,7 @@ class WordSession:
 
         pids_before = _get_winword_pids()
         try:
-            self.word = win32com.client.Dispatch("Word.Application")
+            self.word = win32com.client.DispatchEx("Word.Application")
             pids_after = _get_winword_pids()
             new_pids = pids_after - pids_before
             if new_pids:
@@ -265,15 +267,19 @@ class WordSession:
             self.pid = None
             return
 
+        w = self.word
+        pid = self.pid
+        self.word = None
+        self.pid = None
+
         try:
-            self.word.Quit(SaveChanges=0)
-        except Exception:
+            w.Quit(SaveChanges=0)
+        except (Exception, BaseException):
             # 若正常 Quit 失败，保底 taskkill
-            if self.pid is not None:
-                _taskkill_pid(self.pid)
+            if pid is not None:
+                _taskkill_pid(pid)
         finally:
-            self.word = None
-            self.pid = None
+            del w
             if pythoncom is not None:
                 try:
                     pythoncom.CoUninitialize()
@@ -287,6 +293,37 @@ class WordSession:
 # ---------------------------------------------------------------------------
 # 单文件转换与 PDF 导出函数
 # ---------------------------------------------------------------------------
+
+def strip_docx_update_fields(docx_path: Path) -> None:
+    """清理 DOCX 包内 word/settings.xml 中的 updateFields 标记，防止打开弹窗。"""
+    try:
+        if not docx_path.is_file():
+            return
+        tmp_pkg = docx_path.with_name(f"{docx_path.stem}_strip_{os.getpid()}_{int(time.time()*1000)}.docx")
+        modified = False
+        with zipfile.ZipFile(docx_path, "r") as zin:
+            if "word/settings.xml" not in zin.namelist():
+                return
+            with zipfile.ZipFile(tmp_pkg, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    data = zin.read(item.filename)
+                    if item.filename == "word/settings.xml":
+                        text = data.decode("utf-8", errors="ignore")
+                        if "updateFields" in text:
+                            new_text = re.sub(r"<w:updateFields\b[^>]*?/>", "", text)
+                            new_text = new_text.replace('<w:updateFields w:val="true"/>', "")
+                            new_text = new_text.replace('<w:updateFields w:val="1"/>', "")
+                            new_text = new_text.replace("<w:updateFields/>", "")
+                            data = new_text.encode("utf-8")
+                            modified = True
+                    zout.writestr(item, data)
+        if modified and tmp_pkg.exists() and tmp_pkg.stat().st_size > 0:
+            shutil.move(str(tmp_pkg), str(docx_path))
+        else:
+            tmp_pkg.unlink(missing_ok=True)
+    except Exception:
+        pass
+
 
 def convert_file_com(
     src: Path,
@@ -370,6 +407,8 @@ def convert_file_com(
             _wait_output(tmp_dst)
 
         if tmp_dst.is_file() and tmp_dst.stat().st_size > 0:
+            if target == "docx":
+                strip_docx_update_fields(tmp_dst)
             if dst_p.exists():
                 if dst_p.is_file():
                     dst_p.unlink()
@@ -471,11 +510,13 @@ def export_pdf_com(
     session: WordSession | None = None,
     doc_structure_tags: bool = True,
     optimize_for_on_screen: bool = False,
+    update_fields: bool = True,
 ) -> FileResult:
     """使用 Word COM ExportAsFixedFormat 导出高保真 PDF。
 
     - create_bookmarks=True 时设置 wdExportCreateHeadingBookmarks (1)，生成标题书签；
-    - 执行全量 StoryRanges 与 TablesOfContents 域更新，确保导出的 PDF 页码绝对准确；
+    - update_fields=True (strict申报对齐模式)：执行全量 StoryRanges 与 TablesOfContents 域更新，确保导出的 PDF 页码绝对准确；
+    - update_fields=False (fast极速审阅模式)：跳过 Word 域深度重排，直接按当前 DOCX 静态版面快速输出，节省 60%+ 耗时；
     - 支持超时守护。
     """
     if not is_wincom_supported():
@@ -518,8 +559,9 @@ def export_pdf_com(
         if tmp_dst.exists():
             tmp_dst.unlink(missing_ok=True)
 
-        # 刷新文档域代码与原生 TOC 目录对象
-        _update_document_fields_and_tocs(doc)
+        # 仅在 strict 模式下刷新文档域代码与原生 TOC 目录对象
+        if update_fields:
+            _update_document_fields_and_tocs(doc)
 
         # 导出 PDF
         doc.ExportAsFixedFormat(
@@ -547,7 +589,8 @@ def export_pdf_com(
                 Visible=False,
                 ConfirmConversions=False,
             )
-            _update_document_fields_and_tocs(doc)
+            if update_fields:
+                _update_document_fields_and_tocs(doc)
             doc.ExportAsFixedFormat(
                 OutputFileName=str(tmp_dst),
                 ExportFormat=wdExportFormatPDF,
@@ -634,6 +677,7 @@ class WincomRunner:
         gray: bool = False,
         progress_cb: Callable[[int, int, FileResult], None] | None = None,
         should_cancel: Callable[[], bool] | None = None,
+        pdf_mode: Literal["fast", "strict"] = "fast",
     ) -> list[FileResult]:
         """按顺序串行转换文档列表。
 
@@ -698,6 +742,7 @@ class WincomRunner:
                         create_bookmarks=True,
                         timeout_sec=self.timeout_sec,
                         session=session,
+                        update_fields=(pdf_mode == "strict"),
                     )
                 else:
                     res = convert_file_com(
