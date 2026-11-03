@@ -21,6 +21,7 @@ from pypdf import PdfReader, PdfWriter
 
 from wdt.core.converter_worker import FileResult
 from wdt.core.engine_finder import EngineNotFoundError
+from wdt.core.sleep_inhibitor import SleepInhibitor
 from wdt.core.wincom_worker import WincomRunner, is_wincom_supported
 from wdt.toc.docx_stream_patcher import (
     NoHeadingError,
@@ -60,6 +61,7 @@ class PipelineOptions:
     force: bool = False
     pages: tuple[int, int] | None = None  # 仅单文件 PDF 截取
     base_dir: Path | None = None  # 递归源基准目录，用于镜像相对路径
+    pdf_mode: Literal["fast", "strict"] = "fast"  # fast: 静态直出秒开级; strict: 申报对齐逐页校准
 
 
 def slice_pdf(src_pdf: Path, dst_pdf: Path, page_start: int, page_end: int) -> None:
@@ -98,18 +100,14 @@ def resolve_destination(
     return src.parent / f"{src.stem}{target_ext}"
 
 
-def run_pipeline(
+def _run_pipeline_impl(
     files: Sequence[Path],
     options: PipelineOptions,
     progress_cb: Callable[[PipelineEvent], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
     engine: object | None = None,
 ) -> list[PipelineEvent]:
-    """执行文档处理流水线。
-
-    根据 options.mode 执行相应任务，支持进度上报与协同式取消机制。
-    全量基于 Windows 原生 Word COM 自动化引擎。
-    """
+    """执行文档处理流水线的内部实现。"""
     # 1. 约束校验
     if not is_wincom_supported():
         raise EngineNotFoundError(
@@ -229,6 +227,7 @@ def run_pipeline(
                 target=cur_target,  # type: ignore
                 progress_cb=_on_convert_progress,
                 should_cancel=should_cancel,
+                pdf_mode=options.pdf_mode,
             )
 
         return events
@@ -376,8 +375,34 @@ def run_pipeline(
                     target="pdf",
                     progress_cb=_on_pdf_progress,
                     should_cancel=should_cancel,
+                    pdf_mode=options.pdf_mode,
                 )
 
         return events
 
     raise ValueError(f"不支持的 pipeline mode: {options.mode}")
+
+
+def run_pipeline(
+    files: Sequence[Path],
+    options: PipelineOptions,
+    progress_cb: Callable[[PipelineEvent], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    engine: object | None = None,
+) -> list[PipelineEvent]:
+    """执行文档处理流水线。
+
+    根据 options.mode 执行相应任务，支持进度上报与协同式取消机制。
+    全量基于 Windows 原生 Word COM 自动化引擎。
+    整个批处理运行生命周期通过 SleepInhibitor 阻止系统在转换期间因空闲而自动休眠。
+    """
+    reason = f"wdt pipeline mode={options.mode}, files={len(files)}"
+    with SleepInhibitor(reason=reason):
+        return _run_pipeline_impl(
+            files=files,
+            options=options,
+            progress_cb=progress_cb,
+            should_cancel=should_cancel,
+            engine=engine,
+        )
+
