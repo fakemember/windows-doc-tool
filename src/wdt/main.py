@@ -284,6 +284,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         force=args.force,
         pages=pages_range,
         base_dir=target_path if target_path.is_dir() else None,
+        pdf_mode=getattr(args, "pdf_mode", "fast"),
     )
 
     if pages_range is not None:
@@ -447,6 +448,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         toc=toc_config,
         force=args.force,
         base_dir=target_path if target_path.is_dir() else None,
+        pdf_mode=getattr(args, "pdf_mode", "fast"),
     )
 
     print(f"🔄 启动一体化流水线: 待处理 {len(files)} 个文档 (导出PDF: {args.pdf}, Word COM 引擎)...\n")
@@ -483,7 +485,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0 if len(unique_failed_srcs) == 0 else 1
 
 
-def cmd_gui(args: argparse.Namespace) -> int:
+def cmd_gui(args: argparse.Namespace | None = None) -> int:
     """执行 gui 启动桌面图形交互界面命令。"""
     try:
         from wdt.ui.main_window import launch_gui
@@ -518,6 +520,12 @@ def build_parser() -> WdtArgumentParser:
         help="目标输出格式（默认 docx）",
     )
     sub_conv.add_argument("--pages", default=None, help="仅转换指定页码区间 A-B（仅限单文件）")
+    sub_conv.add_argument(
+        "--pdf-mode",
+        choices=["fast", "strict"],
+        default="fast",
+        help="PDF 导出模式: fast(极速审阅模式, 默认)|strict(申报严密对齐模式, Word 深度物理校准)",
+    )
     sub_conv.add_argument("-f", "--force", action="store_true", help="强制覆盖已存在的目标文件")
     sub_conv.set_defaults(func=cmd_convert)
 
@@ -546,8 +554,8 @@ def build_parser() -> WdtArgumentParser:
     sub_toc.add_argument(
         "--page-mode",
         choices=["static-restart", "static-offset", "static-in-place", "measured", "dynamic"],
-        default="dynamic",
-        help="页码计算模式（默认 dynamic 原生动态域）",
+        default="static-restart",
+        help="页码计算模式（默认 static-restart 静态固化页码+首屏秒开）",
     )
     sub_toc.add_argument("--page-offset", type=int, default=0, help="页码偏移补偿量")
     sub_toc.add_argument("--no-backup", action="store_true", help="就地修改，不保留 .bak 备份文件")
@@ -579,12 +587,18 @@ def build_parser() -> WdtArgumentParser:
     )
     sub_run.add_argument(
         "--page-mode",
-        choices=["dynamic", "measured", "static-restart", "static-offset", "static-in-place"],
-        default="dynamic",
-        help="页码计算模式（默认 dynamic 原生动态域）",
+        choices=["static-restart", "static-offset", "static-in-place", "measured", "dynamic"],
+        default="static-restart",
+        help="页码计算模式（默认 static-restart 静态固化页码+首屏秒开）",
     )
     sub_run.add_argument("--page-offset", type=int, default=0, help="页码偏移补偿量")
     sub_run.add_argument("--pdf", action="store_true", help="级联生成 PDF")
+    sub_run.add_argument(
+        "--pdf-mode",
+        choices=["fast", "strict"],
+        default="fast",
+        help="PDF 导出模式: fast(极速审阅模式, 默认)|strict(申报严密对齐模式, Word 深度物理校准)",
+    )
     sub_run.add_argument("-f", "--force", action="store_true", help="强制覆盖已存在的目标文件")
     sub_run.set_defaults(func=cmd_run)
 

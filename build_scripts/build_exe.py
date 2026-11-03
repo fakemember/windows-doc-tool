@@ -24,6 +24,7 @@ def build_pyinstaller_args(
     dist_dir: Path | None = None,
     work_dir: Path | None = None,
     name: str = "wdt",
+    icon: Path | None = None,
 ) -> list[str]:
     """组装 PyInstaller one-dir 打包参数列表。"""
     entry = Path(entry)
@@ -44,6 +45,10 @@ def build_pyinstaller_args(
         "--collect-all",
         "wdt",
     ]
+
+    if icon and icon.exists():
+        args.extend(["--icon", str(icon.resolve())])
+
     # 注意：不要对 PySide6 使用 --collect-all，否则会把整个 Qt6 运行时
     # （qml/plugins/translations/webengine，600MB+）全部打入产物。
     # PyInstaller 内置的 PySide6 hooks 会按实际导入自动收集所需模块与插件。
@@ -57,6 +62,7 @@ def build_exe(
     dist_dir: Path | None = None,
     work_dir: Path | None = None,
     name: str = "wdt",
+    icon: Path | None = None,
     dry_run: bool = False,
 ) -> int:
     """执行 PyInstaller 打包构建。
@@ -66,6 +72,7 @@ def build_exe(
         dist_dir: 产物输出目录 (默认 dist/)
         work_dir: 编译中间缓存目录 (默认 build/)
         name: 生成的可执行文件名 (默认 wdt)
+        icon: 应用程序 Windows 图标文件路径 (.ico)
         dry_run: 若为 True，仅打印构建命令，不执行真实编译
 
     Returns:
@@ -76,6 +83,7 @@ def build_exe(
         dist_dir=dist_dir,
         work_dir=work_dir,
         name=name,
+        icon=icon,
     )
 
     if dry_run:
@@ -138,6 +146,12 @@ def main(argv: list[str] | None = None) -> int:
         help="输出应用程序名称 (默认: wdt)",
     )
     parser.add_argument(
+        "--icon",
+        type=Path,
+        default=project_root / "src" / "wdt" / "ui" / "assets" / "tflow_logo.ico",
+        help="Windows .ico 图标路径 (默认: src/wdt/ui/assets/tflow_logo.ico)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="仅打印将要执行的 PyInstaller 打包命令，不执行真实构建",
@@ -149,6 +163,7 @@ def main(argv: list[str] | None = None) -> int:
         dist_dir=args.distpath,
         work_dir=args.workpath,
         name=args.name,
+        icon=args.icon,
         dry_run=args.dry_run,
     )
 

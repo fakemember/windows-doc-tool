@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Sequence
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QColor, QDropEvent, QFont, QIcon
+from PySide6.QtGui import QColor, QDropEvent, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -134,8 +134,12 @@ class MainWindow(QMainWindow):
         self.resize(1200, 800)
         self.setMinimumSize(1000, 680)
 
-        logo_svg = Path(__file__).parent / "assets" / "tflow_logo.svg"
-        if logo_svg.is_file():
+        assets_dir = Path(__file__).parent / "assets"
+        logo_ico = assets_dir / "tflow_logo.ico"
+        logo_svg = assets_dir / "tflow_logo.svg"
+        if logo_ico.is_file():
+            self.setWindowIcon(QIcon(str(logo_ico)))
+        elif logo_svg.is_file():
             self.setWindowIcon(QIcon(str(logo_svg)))
 
         self.files_list: list[Path] = []
@@ -201,13 +205,20 @@ class MainWindow(QMainWindow):
         header_layout.setContentsMargins(16, 8, 16, 8)
         header_layout.setSpacing(12)
 
-        brand_badge = QLabel("T", header_bar)
-        brand_badge.setFixedSize(36, 36)
+        brand_badge = QLabel(header_bar)
+        brand_badge.setFixedSize(38, 38)
         brand_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        brand_badge.setStyleSheet(
-            "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #2563EB, stop:1 #06B6D4); "
-            "color: #FFFFFF; font-size: 19px; font-weight: 800; border-radius: 8px;"
-        )
+        logo_svg = Path(__file__).parent / "assets" / "tflow_logo.svg"
+        if logo_svg.is_file():
+            logo_pix = QIcon(str(logo_svg)).pixmap(38, 38)
+            brand_badge.setPixmap(logo_pix)
+            brand_badge.setScaledContents(True)
+        else:
+            brand_badge.setText("T")
+            brand_badge.setStyleSheet(
+                "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #2563EB, stop:1 #06B6D4); "
+                "color: #FFFFFF; font-size: 19px; font-weight: 800; border-radius: 8px;"
+            )
         header_layout.addWidget(brand_badge)
 
         brand_text = QVBoxLayout()
@@ -341,6 +352,40 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.chk_force, 1, 1)
         layout.addLayout(grid)
 
+        # PDF 模式选择区
+        self.pdf_mode_box = QFrame(card)
+        self.pdf_mode_box.setStyleSheet(
+            "background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px; padding: 4px;"
+        )
+        pdf_mode_layout = QVBoxLayout(self.pdf_mode_box)
+        pdf_mode_layout.setContentsMargins(8, 6, 8, 6)
+        pdf_mode_layout.setSpacing(4)
+
+        mode_header = QLabel("PDF 导出与页码校准模式：", self.pdf_mode_box)
+        mode_header.setStyleSheet("font-size: 11px; font-weight: 600; color: #475569;")
+        pdf_mode_layout.addWidget(mode_header)
+
+        mode_btn_layout = QHBoxLayout()
+        mode_btn_layout.setSpacing(12)
+
+        self.radio_pdf_fast = QRadioButton("⚡ 极速审阅模式 (直出秒级耗时·推荐草稿)", self.pdf_mode_box)
+        self.radio_pdf_fast.setChecked(True)
+        self.radio_pdf_fast.setToolTip("基于 DOCX 静态版面快速输出，跳过全量长表格重排，耗时缩短 60%+")
+
+        self.radio_pdf_strict = QRadioButton("🛡️ 申报对齐模式 (Word逐页深度校准·提交级)", self.pdf_mode_box)
+        self.radio_pdf_strict.setToolTip("Word 引擎逐页物理校准，计算自然跨页表格与精准页码，大文档需较长时间但页码 100% 对齐")
+
+        self.pdf_mode_group = QButtonGroup(self)
+        self.pdf_mode_group.addButton(self.radio_pdf_fast, 1)
+        self.pdf_mode_group.addButton(self.radio_pdf_strict, 2)
+
+        mode_btn_layout.addWidget(self.radio_pdf_fast)
+        mode_btn_layout.addWidget(self.radio_pdf_strict)
+        pdf_mode_layout.addLayout(mode_btn_layout)
+
+        layout.addWidget(self.pdf_mode_box)
+        self.chk_pdf.toggled.connect(self.pdf_mode_box.setVisible)
+
         return card
 
     def _build_toc_settings_card(self, parent: QWidget) -> QFrame:
@@ -414,11 +459,11 @@ class MainWindow(QMainWindow):
         params_grid.addWidget(self._form_label("页码重算策略"), 2, 1)
         self.combo_page_mode = QComboBox(self.toc_body_widget)
         self.combo_page_mode.addItems([
-            "Word 动态域 (正文从1重新编页·推荐)",
+            "静态分节秒开 (首屏极速·正文从1重新编页·推荐)",
             "静态页码偏移",
-            "保留原页码",
-            "旧式静态重置",
+            "静态原位替换",
             "实测页码",
+            "Word 动态域 (打开自动更新字段·大文件卡顿)",
         ])
         self.combo_page_mode.setCurrentIndex(0)
         params_grid.addWidget(self.combo_page_mode, 3, 1)
@@ -666,13 +711,13 @@ class MainWindow(QMainWindow):
 
         page_mode_idx = self.combo_page_mode.currentIndex()
         page_mode_map = {
-            0: PageMode.DYNAMIC,
+            0: PageMode.STATIC_RESTART,
             1: PageMode.STATIC_OFFSET,
             2: PageMode.STATIC_IN_PLACE,
-            3: PageMode.STATIC_RESTART,
-            4: PageMode.STATIC_MEASURED,
+            3: PageMode.STATIC_MEASURED,
+            4: PageMode.DYNAMIC,
         }
-        page_mode = page_mode_map.get(page_mode_idx, PageMode.DYNAMIC)
+        page_mode = page_mode_map.get(page_mode_idx, PageMode.STATIC_RESTART)
 
         toc_config = TocConfig(
             style=style,
@@ -692,6 +737,10 @@ class MainWindow(QMainWindow):
         else:
             mode = "run"
 
+        pdf_mode: Literal["fast", "strict"] = (
+            "strict" if self.radio_pdf_strict.isChecked() else "fast"
+        )
+
         return PipelineOptions(
             mode=mode,  # type: ignore[arg-type]
             out_dir=out_dir,
@@ -701,6 +750,7 @@ class MainWindow(QMainWindow):
             toc=toc_config,
             jobs=self.spin_jobs.value(),
             force=self.chk_force.isChecked(),
+            pdf_mode=pdf_mode,
         )
 
     def _set_running_state(self, running: bool) -> None:
