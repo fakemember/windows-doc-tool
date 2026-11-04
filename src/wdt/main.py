@@ -23,6 +23,7 @@ from wdt.core.engine_finder import (
     WordEngine,
     find_word_engine,
 )
+from wdt.core.pdf_splitter import split_pdf_by_outline
 from wdt.pipeline import (
     PipelineEvent,
     PipelineOptions,
@@ -485,6 +486,55 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0 if len(unique_failed_srcs) == 0 else 1
 
 
+def cmd_split(args: argparse.Namespace) -> int:
+    """执行 split PDF 依据大纲拆分命令。"""
+    pdf_path = Path(args.pdf).resolve()
+    if not pdf_path.exists():
+        print(f"错误: 目标文件不存在: {pdf_path}", file=sys.stderr)
+        return 1
+    if pdf_path.suffix.lower() != ".pdf":
+        print(f"错误: 仅支持 PDF 格式文件: {pdf_path.name}", file=sys.stderr)
+        return 1
+
+    out_dir = Path(args.outdir).resolve() if args.outdir else None
+    with_toc = not args.no_visual_toc
+
+    print(f"\n📚 开始依据顶级大纲拆分 PDF: {pdf_path.name}")
+    print(f"   - 独立可视目录页: {'已启用' if with_toc else '已禁用'}")
+    print(f"   - 卷内大纲书签重构: 已启用\n")
+
+    t0 = time.time()
+    try:
+        results = split_pdf_by_outline(
+            src_pdf=pdf_path,
+            out_dir=out_dir,
+            with_visual_toc=with_toc,
+            max_pages=args.max_pages,
+        )
+    except Exception as e:
+        print(f"拆分失败: {e}", file=sys.stderr)
+        return 1
+
+    elapsed = time.time() - t0
+    if not results:
+        print("未检测到可切分的内容或书签，未生成分卷。", file=sys.stderr)
+        return 1
+
+    digits = len(str(len(results)))
+    print("=" * 60)
+    print(f"🎉 拆分成功！共生成 {len(results)} 个分卷 (耗时 {elapsed:.2f}s):")
+    for r in results:
+        sz_mb = r.file_size_bytes / (1024 * 1024)
+        orig_range = f"原P.{r.original_pages[0]}-P.{r.original_pages[1]}"
+        prefix = f"[{r.volume_index:>{digits}}/{len(results)}]"
+        print(f"  {prefix} 卷: {r.output_path.name}")
+        print(f"         页数: {r.page_count} 页 ({orig_range}) | 大小: {sz_mb:.2f} MB")
+    print("=" * 60)
+    target_dir = results[0].output_path.parent
+    print(f"📁 输出目录: {target_dir}\n")
+    return 0
+
+
 def cmd_gui(args: argparse.Namespace | None = None) -> int:
     """执行 gui 启动桌面图形交互界面命令。"""
     try:
@@ -602,7 +652,24 @@ def build_parser() -> WdtArgumentParser:
     sub_run.add_argument("-f", "--force", action="store_true", help="强制覆盖已存在的目标文件")
     sub_run.set_defaults(func=cmd_run)
 
-    # 5. gui
+    # 5. split
+    sub_split = subparsers.add_parser("split", help="依据大纲切分超大 PDF 并注入各卷独立目录与书签")
+    sub_split.add_argument("pdf", help="待切分的超大 PDF 文件路径")
+    sub_split.add_argument("-o", "--outdir", default=None, help="分卷输出目录（默认在源文件同级生成 *_volumes 文件夹）")
+    sub_split.add_argument(
+        "--max-pages",
+        type=int,
+        default=150,
+        help="单卷最大推荐目标页数（默认 150 页，约 5~8MB，适配邮件安全阈值，在业务大纲边界自适应装箱）",
+    )
+    sub_split.add_argument(
+        "--no-visual-toc",
+        action="store_true",
+        help="不插入独立可视目录页，仅重构 PDF 侧边栏原生书签",
+    )
+    sub_split.set_defaults(func=cmd_split)
+
+    # 6. gui
     sub_gui = subparsers.add_parser("gui", help="启动图形交互界面")
     sub_gui.set_defaults(func=cmd_gui)
 
@@ -624,6 +691,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 reconfigure(encoding="utf-8", errors="replace")
             except Exception:
                 pass
+
+    from wdt.core.applog import setup_logging
+
+    setup_logging()
 
     # Windows 环境且无终端控制台（双击 exe 启动）且未传参数时，默认启动 GUI
     if not argv and sys.platform == "win32" and not has_console and not os.environ.get("PYTEST_CURRENT_TEST"):
