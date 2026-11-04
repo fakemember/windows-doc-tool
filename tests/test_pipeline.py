@@ -144,7 +144,14 @@ def test_pipeline_run_mode_full(tmp_path: Path, monkeypatch):
     assert Stage.CONVERT in stages
     assert Stage.TOC in stages
     assert Stage.PDF in stages
-    assert all(e.status == "ok" for e in events)
+    terminal = [e for e in events if e.status != "running"]
+    assert all(e.status == "ok" for e in terminal)
+    # running 中间事件必须先于同阶段 ok 事件出现
+    seq = [(e.stage, e.status) for e in events]
+    for stage in (Stage.CONVERT, Stage.PDF):
+        first_run = next(i for i, s in enumerate(seq) if s == (stage, "running"))
+        first_ok = next(i for i, s in enumerate(seq) if s == (stage, "ok"))
+        assert first_run < first_ok
 
 
 def test_pipeline_force_and_skip(tmp_path: Path, monkeypatch):

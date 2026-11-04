@@ -838,7 +838,10 @@ class MainWindow(QMainWindow):
             item_elapsed = self.table.item(row, 3)
 
             if item_status:
-                if ev.status == "ok":
+                if ev.status == "running":
+                    item_status.setText(f"⏳ {stage_prefix}中…")
+                    item_status.setForeground(QColor(STATUS_COLORS["queued"]))
+                elif ev.status == "ok":
                     item_status.setText(f"✓ {stage_prefix}完成")
                     item_status.setForeground(QColor(STATUS_COLORS["ok"]))
                 elif ev.status == "failed":
@@ -855,6 +858,9 @@ class MainWindow(QMainWindow):
 
             if item_elapsed and ev.status == "ok" and ev.message:
                 item_elapsed.setText(ev.message.split()[-1].rstrip(")"))
+
+            if ev.status == "running":
+                return  # 中间状态：仅更新行内提示，不推进总进度
 
             val = self.progress_bar.value() + 1
             self.progress_bar.setValue(val)

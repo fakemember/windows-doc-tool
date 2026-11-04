@@ -416,3 +416,21 @@ def test_wincom_runner_cancel_during_execution(tmp_path: Path):
         assert results[0].ok is True
         assert results[1].ok is False
         assert results[1].error == "cancelled"
+
+
+def test_sanitize_src_for_open_brackets(tmp_path: Path):
+    """含方括号的文件名复制为无括号临时副本；无括号文件原样返回。"""
+    src = tmp_path / "BLUpan-03-001[28OCT26]_Listing.DOC"
+    src.write_bytes(b"{\rtf1 test}")
+    open_path, tmp_copy = ww._sanitize_src_for_open(src)
+    assert open_path != src
+    assert "[" not in open_path.name and "]" not in open_path.name
+    assert open_path.read_bytes() == src.read_bytes()
+    assert tmp_copy is not None and tmp_copy.exists()
+    tmp_copy.unlink()
+
+    plain = tmp_path / "plain.DOC"
+    plain.write_bytes(b"{\rtf1 test}")
+    open_path2, tmp_copy2 = ww._sanitize_src_for_open(plain)
+    assert open_path2 == plain
+    assert tmp_copy2 is None

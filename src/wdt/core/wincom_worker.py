@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 import os
 import re
 import shutil
@@ -14,6 +15,8 @@ from pathlib import Path
 from typing import Callable, Literal, Sequence
 
 from wdt.core.converter_worker import FileResult
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # pywin32 软隔离与跨平台常量兜底
@@ -325,6 +328,19 @@ def strip_docx_update_fields(docx_path: Path) -> None:
         pass
 
 
+def _sanitize_src_for_open(src_p: Path) -> tuple[Path, Path | None]:
+    """Word COM 打开含方括号 [] 的文件名时可能报“命令失败” (wdmain11.chm 36966,
+    大体积 RTF 文件必现)；此时复制到同目录无括号临时名再打开。
+
+    返回 (实际打开路径, 需清理的临时副本)；无需处理时临时副本为 None。
+    """
+    if "[" not in src_p.name and "]" not in src_p.name:
+        return src_p, None
+    tmp_copy = src_p.with_name(f"wdt_open_{os.getpid()}_{int(time.time()*1000)}{src_p.suffix}")
+    shutil.copy2(str(src_p), str(tmp_copy))
+    return tmp_copy, tmp_copy
+
+
 def convert_file_com(
     src: Path,
     dst: Path,
@@ -349,6 +365,10 @@ def convert_file_com(
     dst_p = Path(dst).resolve()
     dst_p.parent.mkdir(parents=True, exist_ok=True)
 
+    open_src, tmp_copy = _sanitize_src_for_open(src_p)
+    if tmp_copy is not None:
+        logger.info("文件名含方括号，已复制为临时副本: %s -> %s", src_p.name, tmp_copy.name)
+
     fmt_code = wdFormatXMLDocument if target == "docx" else wdFormatPDF
 
     own_session = False
@@ -368,8 +388,9 @@ def convert_file_com(
 
     try:
         # 打开源文档：禁用宏警告、静默转换提示、以只读模式无界面打开
+        logger.info("Word 打开文档: %s (%.1f MB)", open_src.name, open_src.stat().st_size / 1048576)
         doc = sess.word.Documents.Open(
-            FileName=str(src_p),
+            FileName=str(open_src),
             ReadOnly=True,
             AddToRecentFiles=False,
             Visible=False,
@@ -392,7 +413,7 @@ def convert_file_com(
         if not _wait_output(tmp_dst):
             # 输出未落盘：重试一次（打印管线瞬时未就绪场景）
             doc = sess.word.Documents.Open(
-                FileName=str(src_p),
+                FileName=str(open_src),
                 ReadOnly=True,
                 AddToRecentFiles=False,
                 Visible=False,
@@ -439,8 +460,15 @@ def convert_file_com(
         if own_session:
             sess.stop()
 
+    if tmp_copy is not None:
+        tmp_copy.unlink(missing_ok=True)
+
     elapsed = time.time() - t_start
     ok = (error_msg == "") and dst_p.is_file() and (dst_p.stat().st_size > 0)
+    if ok:
+        logger.info("转换完成: %s -> %s, 耗时 %.1fs", src_p.name, dst_p.name, elapsed)
+    else:
+        logger.error("转换失败: %s, 耗时 %.1fs, 错误: %s", src_p.name, elapsed, error_msg)
     return FileResult(
         src=src,
         dst=dst_p if ok else None,

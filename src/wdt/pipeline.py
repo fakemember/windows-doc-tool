@@ -316,6 +316,8 @@ def _run_pipeline_impl(
                 msg = f"[Word COM] {res.elapsed:.2f}s" if res.ok else f"[Word COM] {res.error}"
                 emit(Stage.CONVERT, res.src, st, msg)
 
+            for s, _ in to_convert:
+                emit(Stage.CONVERT, s, "running", "")
             c_results = runner.convert(
                 to_convert,
                 target="docx",
@@ -370,6 +372,8 @@ def _run_pipeline_impl(
                     msg = f"[Word COM] {res.elapsed:.2f}s" if res.ok else f"[Word COM] {res.error}"
                     emit(Stage.PDF, orig, st, msg)
 
+                for _, d in pdf_pairs:
+                    emit(Stage.PDF, pair_to_orig.get(d, d), "running", "")
                 runner.convert(
                     pdf_pairs,
                     target="pdf",
@@ -397,12 +401,19 @@ def run_pipeline(
     整个批处理运行生命周期通过 SleepInhibitor 阻止系统在转换期间因空闲而自动休眠。
     """
     reason = f"wdt pipeline mode={options.mode}, files={len(files)}"
+    logger.info("流水线启动: mode=%s, files=%d, make_docx=%s, make_pdf=%s",
+                options.mode, len(files), options.make_docx, options.make_pdf)
     with SleepInhibitor(reason=reason):
-        return _run_pipeline_impl(
+        events = _run_pipeline_impl(
             files=files,
             options=options,
             progress_cb=progress_cb,
             should_cancel=should_cancel,
             engine=engine,
         )
+    for ev in events:
+        logger.info("事件: stage=%s, file=%s, status=%s, message=%s",
+                    ev.stage.value, ev.src.name, ev.status, ev.message)
+    logger.info("流水线结束: %d 事件", len(events))
+    return events
 
