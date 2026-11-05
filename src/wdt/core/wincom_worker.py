@@ -127,8 +127,22 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
+def _wait_pid_exit(pid: int, timeout_sec: float, interval: float = 2.0) -> bool:
+    """轮询等待 PID 退出，超时返回 False。"""
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        if not _pid_alive(pid):
+            return True
+        time.sleep(interval)
+    return not _pid_alive(pid)
+
+
 def _spawn_watchdog(pid: int, timeout_sec: float) -> subprocess.Popen:
-    """拉起独立看门狗子进程：超时后对 Word 进程树执行 taskkill 并验证终止。
+    """拉起独立看门狗子进程：超时后分阶段终止 Word 进程树。
+
+    阶段 1: 非强制 taskkill（允许 Word 走正常关闭流程，避免产生文档恢复残留）；
+    阶段 2: 宽限期等待进程自行退出；
+    阶段 3: 仍未退出则 taskkill /T /F 强杀并验证。
 
     使用独立进程而非 threading.Timer：主机高负载或主线程阻塞在 COM 调用中时，
     Python 线程可能被饿死而错过超时窗口；独立进程不受本进程调度影响。
@@ -136,12 +150,25 @@ def _spawn_watchdog(pid: int, timeout_sec: float) -> subprocess.Popen:
     script = (
         "import subprocess,sys,time\n"
         "pid=int(sys.argv[1]); timeout=float(sys.argv[2])\n"
+        "def alive():\n"
+        "    out=subprocess.run(['tasklist.exe','/FI',f'PID eq {pid}','/FO','CSV','/NH'],capture_output=True,text=True,check=False).stdout\n"
+        "    return str(pid) in out\n"
         "time.sleep(max(timeout, 1))\n"
+        "if not alive():\n"
+        "    sys.exit(0)\n"
+        "# 阶段 1: 非强制终止，给 Word 正常关闭的机会\n"
+        "subprocess.run(['taskkill.exe','/PID',str(pid),'/T'],capture_output=True,check=False)\n"
+        "# 阶段 2: 宽限期\n"
+        "deadline=time.time()+30\n"
+        "while time.time()<deadline:\n"
+        "    if not alive():\n"
+        "        sys.exit(0)\n"
+        "    time.sleep(2)\n"
+        "# 阶段 3: 强杀并验证\n"
         "for _ in range(3):\n"
         "    subprocess.run(['taskkill.exe','/PID',str(pid),'/T','/F'],capture_output=True,check=False)\n"
         "    time.sleep(15)\n"
-        "    out=subprocess.run(['tasklist.exe','/FI',f'PID eq {pid}','/FO','CSV','/NH'],capture_output=True,text=True,check=False).stdout\n"
-        "    if str(pid) not in out:\n"
+        "    if not alive():\n"
         "        break\n"
     )
     return subprocess.Popen(
@@ -195,6 +222,11 @@ class WordSession:
         # taskkill 后仍存活的 PID（Word 卡在打印驱动调用时无法立即终止）；
         # 非 None 时提示用户重启系统，这是唯一可靠的外部处置。
         self.kill_failed: int | None = None
+        # 最近一次退出方式: "quit" 正常退出 / "graceful" 关闭文档后强杀兜底 /
+        # "force" 未走 COM 直接强杀；用于排查文档恢复残留。
+        self.exit_reason: str = ""
+        # kill() 中优雅关闭阶段的看门狗超时（秒）：COM 调用卡死时由此兜底强杀
+        self._grace_guard_sec: int = 120
 
     def start(self) -> None:
         """初始化 COM 并启动受装甲保护的 Word.Application。"""
@@ -241,12 +273,56 @@ class WordSession:
             self.kill()
             raise
 
+    def _close_all_documents(self, w) -> None:
+        """优雅关闭 Word 实例中全部文档（不保存），避免残留文档恢复记录。
+
+        注意：w 必须作为参数显式传入——调用方（如 kill）可能已先将 self.word 置空。
+        """
+        if w is None:
+            return
+        try:
+            docs = w.Documents
+            for i in range(docs.Count, 0, -1):
+                try:
+                    docs.Item(i).Close(SaveChanges=0)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def kill(self) -> None:
-        """强制终止 Word 进程树并重置 COM 代理，防止悬空指针 RPC_E_DISCONNECTED。"""
+        """分层终止 Word：先优雅关闭文档并 Quit，失败后才强杀进程树。
+
+        目的：正常失败路径不留下 Word 文档恢复残留。COM 调用可能卡死，
+        故在尝试优雅关闭前拉起短超时守护子进程兜底强杀。
+        """
         self._killed = True
         pid = self.pid
         self.pid = None
-        if pid is not None:
+        w = self.word
+        self.word = None
+
+        guard: subprocess.Popen | None = None
+        grace_guard_sec = getattr(self, "_grace_guard_sec", 120)
+        if pid is not None and pid > 0 and _pid_alive(pid):
+            guard = _spawn_watchdog(pid, grace_guard_sec)
+
+        graceful = False
+        if w is not None and pid is not None:
+            try:
+                self._close_all_documents(w)
+                w.Quit(SaveChanges=0)
+                graceful = True
+            except (Exception, BaseException):
+                graceful = False
+            finally:
+                del w
+            if graceful:
+                self.exit_reason = "graceful" if _pid_alive(pid) else "quit"
+                graceful = _wait_pid_exit(pid, 30)
+
+        if pid is not None and _pid_alive(pid):
+            self.exit_reason = "force"
             _taskkill_pid(pid)
             # 验证进程确实已终止：Word 卡在打印驱动调用中时 taskkill 也无法立即生效
             for _ in range(3):
@@ -255,8 +331,10 @@ class WordSession:
                 time.sleep(10)
             self.kill_failed = pid if _pid_alive(pid) else None
 
-        # 杀掉后严禁再触碰任何已断开的 COM 代理
-        self.word = None
+        if guard is not None and guard.poll() is None:
+            guard.terminate()
+
+        # 终止后严禁再触碰任何已断开的 COM 代理
         if pythoncom is not None:
             try:
                 pythoncom.CoUninitialize()
@@ -264,30 +342,29 @@ class WordSession:
                 pass
 
     def stop(self) -> None:
-        """正常关闭 Word 实例。"""
+        """正常关闭 Word 实例；Quit 失败时退化为分层强杀。"""
         if self._killed or self.word is None:
             self.word = None
             self.pid = None
             return
 
-        w = self.word
         pid = self.pid
-        self.word = None
-        self.pid = None
-
         try:
-            w.Quit(SaveChanges=0)
+            self.word.Quit(SaveChanges=0)
+            self.word = None
+            if pid is not None and _wait_pid_exit(pid, 30):
+                self.pid = None
+                self.exit_reason = "quit"
+                if pythoncom is not None:
+                    try:
+                        pythoncom.CoUninitialize()
+                    except Exception:
+                        pass
+                return
         except (Exception, BaseException):
-            # 若正常 Quit 失败，保底 taskkill
-            if pid is not None:
-                _taskkill_pid(pid)
-        finally:
-            del w
-            if pythoncom is not None:
-                try:
-                    pythoncom.CoUninitialize()
-                except Exception:
-                    pass
+            pass
+        # Quit 失败或进程未退出：走分层 kill（优雅关闭 + 强杀兜底）
+        self.kill()
 
     def is_alive(self) -> bool:
         return not self._killed and self.word is not None
@@ -299,10 +376,10 @@ class WordSession:
 
 def strip_docx_update_fields(docx_path: Path) -> None:
     """清理 DOCX 包内 word/settings.xml 中的 updateFields 标记，防止打开弹窗。"""
+    tmp_pkg = docx_path.with_name(f"{docx_path.stem}_strip_{os.getpid()}_{int(time.time()*1000)}.docx")
     try:
         if not docx_path.is_file():
             return
-        tmp_pkg = docx_path.with_name(f"{docx_path.stem}_strip_{os.getpid()}_{int(time.time()*1000)}.docx")
         modified = False
         with zipfile.ZipFile(docx_path, "r") as zin:
             if "word/settings.xml" not in zin.namelist():
@@ -325,7 +402,8 @@ def strip_docx_update_fields(docx_path: Path) -> None:
         else:
             tmp_pkg.unlink(missing_ok=True)
     except Exception:
-        pass
+        tmp_pkg.unlink(missing_ok=True)
+        logger.warning("清理 updateFields 标记失败: %s", docx_path, exc_info=True)
 
 
 def _sanitize_src_for_open(src_p: Path) -> tuple[Path, Path | None]:
@@ -460,8 +538,11 @@ def convert_file_com(
         if own_session:
             sess.stop()
 
-    if tmp_copy is not None:
-        tmp_copy.unlink(missing_ok=True)
+        if tmp_copy is not None:
+            try:
+                tmp_copy.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("清理临时副本失败: %s", tmp_copy)
 
     elapsed = time.time() - t_start
     ok = (error_msg == "") and dst_p.is_file() and (dst_p.stat().st_size > 0)

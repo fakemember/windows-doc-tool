@@ -78,10 +78,6 @@ class PdfSplitWorker(QThread):
         self.max_pages = max_pages
         self.with_visual_toc = with_visual_toc
         self.style = style
-        self._cancelled = False
-
-    def cancel(self) -> None:
-        self._cancelled = True
 
     def run(self) -> None:
         try:

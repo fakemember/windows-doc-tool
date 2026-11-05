@@ -105,13 +105,16 @@ def test_word_session_armor_settings_and_pid_tracking():
 
 
 def test_word_session_kill_protection():
-    """验证 kill 时调用 taskkill，且严禁触碰 COM 代理，置空并 CoUninitialize。"""
+    """验证 kill 时优先优雅关闭 (Quit)，进程仍存活才 taskkill 强杀，并 CoUninitialize。"""
     mock_word = MagicMock()
     mock_pythoncom = MagicMock()
 
     with patch.object(ww, "is_wincom_supported", return_value=True), \
          patch.object(ww, "pythoncom", mock_pythoncom), \
-         patch.object(ww, "_taskkill_pid") as mock_taskkill:
+         patch.object(ww, "_taskkill_pid") as mock_taskkill, \
+         patch.object(ww, "_pid_alive", side_effect=[True, False, True, False, False]) as mock_alive, \
+         patch.object(ww, "_spawn_watchdog") as mock_watchdog, \
+         patch.object(ww, "_wait_pid_exit", return_value=False):
 
         session = WordSession()
         session.word = mock_word
@@ -119,13 +122,41 @@ def test_word_session_kill_protection():
 
         session.kill()
 
-        # 杀进程树
+        # 先尝试优雅关闭
+        mock_word.Quit.assert_called_once_with(SaveChanges=0)
+        # 优雅关闭后进程仍存活 -> 强杀兜底
         mock_taskkill.assert_called_once_with(9999)
+        assert session.exit_reason == "force"
 
-        # COM 代理置空，未调用任何 mock_word 方法（如 mock_word.Quit）
         assert session.word is None
         assert session.pid is None
-        mock_word.Quit.assert_not_called()
+        mock_pythoncom.CoUninitialize.assert_called_once()
+        mock_watchdog.return_value.poll.assert_called()
+
+
+def test_word_session_kill_graceful_no_force_kill():
+    """验证 kill 时优雅关闭后进程正常退出则不触发强杀，不产生文档恢复残留路径。"""
+    mock_word = MagicMock()
+    mock_pythoncom = MagicMock()
+
+    with patch.object(ww, "is_wincom_supported", return_value=True), \
+         patch.object(ww, "pythoncom", mock_pythoncom), \
+         patch.object(ww, "_taskkill_pid") as mock_taskkill, \
+         patch.object(ww, "_pid_alive", return_value=False), \
+         patch.object(ww, "_spawn_watchdog") as mock_watchdog, \
+         patch.object(ww, "_wait_pid_exit", return_value=True):
+
+        session = WordSession()
+        session.word = mock_word
+        session.pid = 9999
+
+        session.kill()
+
+        mock_word.Quit.assert_called_once_with(SaveChanges=0)
+        mock_taskkill.assert_not_called()
+        assert session.exit_reason == "quit"
+        assert session.word is None
+        assert session.pid is None
         mock_pythoncom.CoUninitialize.assert_called_once()
 
 
@@ -267,7 +298,9 @@ def test_convert_file_com_timeout_triggers_kill(tmp_path: Path):
 
         assert res.ok is False
         assert "超时" in res.error
-        assert mock_kill.called
+        # 看门狗已查杀、进程已不在 -> 分层 kill 走优雅路径，无需再强杀
+        assert session._killed is True
+        assert session.exit_reason == "quit"
         assert session.word is None
 
 
@@ -293,6 +326,7 @@ def test_convert_file_com_timeout_unkillable_word_advises_reboot(tmp_path: Path)
          patch.object(ww, "_taskkill_pid"), \
          patch.object(ww, "_pid_alive", return_value=True), \
          patch.object(ww, "_spawn_watchdog") as mock_wd, \
+         patch.object(ww, "_wait_pid_exit", return_value=False), \
          patch("time.sleep"), \
          patch.object(ww, "pythoncom", MagicMock()):
 
