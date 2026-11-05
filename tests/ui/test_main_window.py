@@ -92,7 +92,6 @@ def test_ui_options_mapping_run_mode(main_window):
     main_window.radio_mode_run.setChecked(True)
     main_window.chk_docx.setChecked(True)
     main_window.chk_pdf.setChecked(True)
-    main_window.chk_gray.setChecked(True)
     main_window.chk_force.setChecked(True)
 
     # 选择现代科技蓝样式
@@ -109,7 +108,6 @@ def test_ui_options_mapping_run_mode(main_window):
     assert opts.mode == "run"
     assert opts.make_docx is True
     assert opts.make_pdf is True
-    assert opts.gray is True
     assert opts.force is True
     assert opts.jobs == 1
 

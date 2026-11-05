@@ -54,3 +54,50 @@ class PipelineWorker(QThread):
             self.finished_signal.emit(results)
         except Exception as e:
             self.error_signal.emit(str(e))
+
+
+class PdfSplitWorker(QThread):
+    """后台独立 PDF 拆分工作线程。"""
+
+    progress_signal = Signal(int, int, str)  # current, total, message
+    finished_signal = Signal(list)           # list[SplitResult]
+    error_signal = Signal(str)
+
+    def __init__(
+        self,
+        pdf_path: Path,
+        out_dir: Path | None,
+        max_pages: int = 500,
+        with_visual_toc: bool = True,
+        style=None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.pdf_path = Path(pdf_path)
+        self.out_dir = Path(out_dir) if out_dir else None
+        self.max_pages = max_pages
+        self.with_visual_toc = with_visual_toc
+        self.style = style
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        try:
+            from wdt.core.pdf_splitter import split_pdf_by_outline
+            from wdt.toc.styles_templates import TocStyle
+
+            use_style = self.style or TocStyle.REGULATORY_LISTING
+            self.progress_signal.emit(0, 100, f"正在解析大纲并切分: {self.pdf_path.name}")
+            results = split_pdf_by_outline(
+                src_pdf=self.pdf_path,
+                out_dir=self.out_dir,
+                max_pages=self.max_pages,
+                with_visual_toc=self.with_visual_toc,
+                style=use_style,
+            )
+            self.progress_signal.emit(100, 100, f"拆分完成，共生成 {len(results)} 个分卷")
+            self.finished_signal.emit(results)
+        except Exception as e:
+            self.error_signal.emit(str(e))

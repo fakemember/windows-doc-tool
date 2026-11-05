@@ -218,21 +218,25 @@ def _build_toc_entry_xml(
                 '</w:rPr>'
             )
     elif style == TocStyle.REGULATORY_LISTING:
-        fonts_xml = _format_rfonts("Times New Roman", "等线", "Times New Roman", body_font)
+        fonts_xml = _format_rfonts("Times New Roman", "宋体", "Times New Roman", body_font)
+        bold_tag = "<w:b/><w:bCs/>" if level == 1 else ""
         title_rpr = (
             '<w:rPr>'
             f'<w:rStyle w:val="{HYPERLINK_STYLE_ID}"/>'
             f'{fonts_xml}'
-            '<w:noProof/>'
+            f'{bold_tag}'
+            '<w:color w:val="000000"/><w:noProof/>'
             '</w:rPr>'
         )
     elif style == TocStyle.CLASSIC_DOT:
         fonts_xml = _format_rfonts("Times New Roman", "宋体", "Times New Roman", body_font)
+        bold_tag = "<w:b/><w:bCs/>" if level == 1 else ""
         title_rpr = (
             '<w:rPr>'
             f'<w:rStyle w:val="{HYPERLINK_STYLE_ID}"/>'
             f'{fonts_xml}'
-            '<w:noProof/>'
+            f'{bold_tag}'
+            '<w:color w:val="111827"/><w:noProof/>'
             '</w:rPr>'
         )
     else:  # MINIMAL_CLEAN

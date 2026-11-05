@@ -23,6 +23,7 @@ from pypdf import PdfReader, PdfWriter
 from pypdf.generic import ArrayObject, Destination, DictionaryObject, FloatObject, NameObject, NumberObject
 
 from wdt.core.toc_pdf_builder import create_toc_pages_batch
+from wdt.toc.styles_templates import TocStyle
 
 
 @dataclass
@@ -504,6 +505,7 @@ def split_pdf_by_outline(
     out_dir: Path | None = None,
     with_visual_toc: bool = True,
     max_pages: int = 150,
+    style: TocStyle = TocStyle.REGULATORY_LISTING,
 ) -> list[SplitResult]:
     """主函数：按大纲与智能层级聚类装箱将超大 PDF 拆分为多个独立分卷。"""
     src_pdf = Path(src_pdf).resolve()
@@ -557,7 +559,7 @@ def split_pdf_by_outline(
                 "items": items_to_draw,
                 "footer_text": footer_txt,
             })
-        toc_pdf_bytes_list = create_toc_pages_batch(toc_specs)
+        toc_pdf_bytes_list = create_toc_pages_batch(toc_specs, style=style)
 
     results: list[SplitResult] = []
     digits = len(str(len(volumes)))

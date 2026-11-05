@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -340,16 +341,12 @@ class MainWindow(QMainWindow):
         self.chk_pdf.setChecked(True)
         self.chk_pdf.setStyleSheet("font-weight: 600; font-size: 13px; color: #1D4ED8;")
 
-        self.chk_gray = QCheckBox("灰度打印优化", card)
-        self.chk_gray.setToolTip("以灰度色调进行排版导出")
-
         self.chk_force = QCheckBox("覆盖已有目标文件", card)
         self.chk_force.setChecked(True)
 
         grid.addWidget(self.chk_docx, 0, 0)
         grid.addWidget(self.chk_pdf, 0, 1)
-        grid.addWidget(self.chk_gray, 1, 0)
-        grid.addWidget(self.chk_force, 1, 1)
+        grid.addWidget(self.chk_force, 1, 0, 1, 2)
         layout.addLayout(grid)
 
         # PDF 模式选择区
@@ -746,7 +743,6 @@ class MainWindow(QMainWindow):
             out_dir=out_dir,
             make_docx=self.chk_docx.isChecked(),
             make_pdf=self.chk_pdf.isChecked(),
-            gray=self.chk_gray.isChecked(),
             toc=toc_config,
             jobs=self.spin_jobs.value(),
             force=self.chk_force.isChecked(),

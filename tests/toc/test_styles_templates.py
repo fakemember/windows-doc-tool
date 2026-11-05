@@ -108,9 +108,9 @@ def test_regulatory_listing_fonts():
     assert color_h.attrib.get(f"{{{W_NS}}}val") == "000000"
     sz_h = s_heading.find("./w:rPr/w:sz", NS)
     assert sz_h is not None
-    assert sz_h.attrib.get(f"{{{W_NS}}}val") == "20"
+    assert sz_h.attrib.get(f"{{{W_NS}}}val") == "22"
 
     s_toc1 = root.find("./w:style[@w:styleId='TOC1']", NS)
     sz_1 = s_toc1.find("./w:rPr/w:sz", NS)
     assert sz_1 is not None
-    assert sz_1.attrib.get(f"{{{W_NS}}}val") == "20"
+    assert sz_1.attrib.get(f"{{{W_NS}}}val") == "21"

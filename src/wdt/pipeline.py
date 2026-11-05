@@ -55,7 +55,6 @@ class PipelineOptions:
     out_dir: Path | None = None  # None = 源文件同目录
     make_docx: bool = True  # convert/run
     make_pdf: bool = False
-    gray: bool = False
     toc: TocConfig | None = None  # toc/run 模式必填
     jobs: int | None = None
     force: bool = False
