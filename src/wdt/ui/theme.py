@@ -292,4 +292,34 @@ QStatusBar {{
     color: {COLOR_TEXT_SECONDARY};
     border: none;
 }}
+
+/* ---------- 标签页 QTabWidget ---------- */
+QTabWidget::pane {{
+    border: 1px solid {COLOR_BORDER};
+    border-radius: 8px;
+    background-color: {COLOR_CARD};
+    top: -1px;
+}}
+QTabBar::tab {{
+    background-color: {COLOR_BG};
+    color: {COLOR_TEXT_SECONDARY};
+    font-weight: 600;
+    font-size: 13px;
+    padding: 8px 18px;
+    border: 1px solid {COLOR_BORDER};
+    border-bottom: none;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    margin-right: 4px;
+}}
+QTabBar::tab:selected {{
+    background-color: {COLOR_CARD};
+    color: {COLOR_ACCENT};
+    border-color: {COLOR_BORDER};
+    border-bottom: 2px solid {COLOR_CARD};
+}}
+QTabBar::tab:hover:!selected {{
+    background-color: {COLOR_ROW_HOVER};
+    color: {COLOR_TEXT};
+}}
 """

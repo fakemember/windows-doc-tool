@@ -1,6 +1,6 @@
 """
 页码计算器：基于 bisect 二分查找高效计算各标题在 Word 中的物理页码。
-支持分节重启（STATIC_RESTART）、页数偏移（STATIC_OFFSET）、原位替换（STATIC_IN_PLACE）、实测页码（STATIC_MEASURED）与动态域（DYNAMIC）五种模式。
+支持连续页码（STATIC_CONTINUOUS）、分节重启（STATIC_RESTART）、页数偏移（STATIC_OFFSET）、原位替换（STATIC_IN_PLACE）、实测页码（STATIC_MEASURED）与动态域（DYNAMIC）六种模式。
 """
 
 from __future__ import annotations
@@ -11,7 +11,8 @@ from typing import Sequence
 
 
 class PageMode(Enum):
-    STATIC_RESTART = "static-restart"      # 分节页码重启（默认）
+    STATIC_CONTINUOUS = "static-continuous" # 全篇连续页码（默认·正文接续目录·解决299/302不一致）
+    STATIC_RESTART = "static-restart"      # 分节页码重启（正文从1重新编页）
     STATIC_OFFSET = "static-offset"        # 估算目录页数偏移补偿
     STATIC_IN_PLACE = "static-in-place"    # 仅 REPLACE_PLACEHOLDER 用，移植基座公式
     STATIC_MEASURED = "measured"           # 基于隐藏锚点实测页码
@@ -79,16 +80,18 @@ def compute_pages(
             pages.append(page_num)
         return pages
 
-    # STATIC_RESTART 与 STATIC_OFFSET 模式：
+    # STATIC_CONTINUOUS, STATIC_RESTART 与 STATIC_OFFSET 模式：
     # 核心公式推导：
-    # 1. 目录插入点 insert_pos 处会注入分节符（目录节结），正文节从此处开启并将页码重启为 1 (pgNumType start=1)。
+    # 1. 目录插入点 insert_pos 处会注入分节符（目录节结）。
+    #    - 在 RESTART 模式下，正文节将页码重启为 1 (pgNumType start=1)。
+    #    - 在 CONTINUOUS / OFFSET 模式下，不重启页码，正文直接接续目录页码，page_offset 补偿目录页数。
     # 2. insert_pos 之前的所有分页符与分节符属于封面/目录节，完全不计入正文页码。
     # 3. 统计严格落在 (insert_pos, p_end) 区间内的硬分页符数量 br_after 与分节符数量 sect_after。
     #    注：硬分页符 <w:br w:type="page"/> 常位于段落内部（如段首），使用 p_end 做 bisect_right
     #    能精确计入本标题段落首部的硬换页符。
     #    正文首个分节之后的每个分节均带来一次页面换节，故正文内每个 sectPr 产生一次新页。
     # 4. 正文首段页码基础值为 1，故 page = 1 + br_after + sect_after。
-    # 5. OFFSET 模式再追加 page_offset（补偿目录实际物理占页数）。
+    # 5. CONTINUOUS / OFFSET 模式再追加 page_offset（补偿目录实际物理占页数）。
     br_insert_idx = bisect.bisect_right(br_positions, insert_pos)
     sect_insert_idx = bisect.bisect_right(sect_positions, insert_pos)
 
@@ -105,7 +108,7 @@ def compute_pages(
         sect_count_after = max(0, sect_pos_idx - sect_insert_idx)
 
         base_page = 1 + br_count_after + sect_count_after
-        if mode == PageMode.STATIC_OFFSET:
+        if mode in (PageMode.STATIC_CONTINUOUS, PageMode.STATIC_OFFSET):
             base_page += page_offset
 
         pages.append(base_page)

@@ -6,6 +6,7 @@ DOCX 字节流注入器：TOC 目录注入引擎主入口。
 from __future__ import annotations
 
 import html
+import math
 import re
 import shutil
 import time
@@ -23,6 +24,10 @@ from wdt.toc.page_measurer import build_heading_anchor_xml, build_sentinel_xml
 from wdt.toc.styles_templates import HYPERLINK_STYLE_ID, TocStyle, toc_styles_fragment
 from wdt.toc.zip_rewriter import rewrite_zip
 
+# 默认目录每页约容纳 38 行（基于 Times New Roman 9-10pt、单倍/紧凑行距的正文目录排版基准）
+# 真实场景中，如遇多行标题折行或宽行距，可由调用方传入 explicit page_offset 进行覆写
+TOC_LINES_PER_PAGE_DEFAULT = 38
+
 
 class Position(Enum):
     DOCUMENT_START = "document-start"
@@ -38,7 +43,7 @@ class TocConfig:
     title: str = "Table of Contents"
     position: Position = Position.DOCUMENT_START
     bookmark_name: str | None = None
-    page_mode: PageMode = PageMode.STATIC_RESTART
+    page_mode: PageMode = PageMode.STATIC_CONTINUOUS
     page_offset: int = 0
     backup: bool = True
 
@@ -429,14 +434,20 @@ def inject_toc(
     else:
         raise ValueError(f"Unknown position: {config.position}")
 
-    # 7. 分节模板与右制表位绝对计算（取 insert_pos 之后首个 sectPr，无则最后一个）
+    # 7. 分节模板与右制表位绝对计算（取正文首个标题之后首个 sectPr，无则取 insert_pos 之后或最后一个）
     sect_matches = list(re.finditer(rb"<w:sectPr\b.*?</w:sectPr>", doc_bytes, re.DOTALL))
     target_sect = None
+    first_heading_pos = valid_headings[0].p_start if valid_headings else insert_pos
     if sect_matches:
         for s in sect_matches:
-            if s.start() >= insert_pos:
+            if s.start() >= first_heading_pos:
                 target_sect = s
                 break
+        if target_sect is None:
+            for s in sect_matches:
+                if s.start() >= insert_pos:
+                    target_sect = s
+                    break
         if target_sect is None:
             target_sect = sect_matches[-1]
 
@@ -456,12 +467,25 @@ def inject_toc(
     right_tab_pos = max(1000, pg_w - pg_left - pg_right - 120)
 
     # 8. 计算页码（STATIC_MEASURED 模式先置占位 0，同时准备 break-count 兜底页码）
+    # 在 STATIC_CONTINUOUS 模式下，预估目录物理占用页数（默认每页约 38 行，最少 1 页）
+    calc_offset = config.page_offset
+    if config.page_mode == PageMode.STATIC_CONTINUOUS:
+        if calc_offset == 0:
+            # 目录行数 = 标题项数 + (1 if has_own_title and config.title else 0)
+            toc_lines = len(valid_headings) + (1 if (has_own_title and config.title) else 0)
+            calc_offset = max(1, math.ceil(toc_lines / TOC_LINES_PER_PAGE_DEFAULT))
+        else:
+            import logging
+            logging.getLogger("wdt.toc").info(
+                "STATIC_CONTINUOUS 模式下检测到用户指定 page_offset=%d，将跳过按行数自动估算", calc_offset
+            )
+
     break_count_pages = compute_pages(
         doc_bytes=doc_bytes,
         heading_positions=[(h.p_start, h.p_end) for h in valid_headings],
         insert_pos=insert_pos,
-        mode=PageMode.STATIC_RESTART,
-        page_offset=config.page_offset,
+        mode=config.page_mode if config.page_mode != PageMode.STATIC_MEASURED else PageMode.STATIC_RESTART,
+        page_offset=calc_offset,
     )
     if config.page_mode == PageMode.STATIC_MEASURED:
         pages = [0] * len(valid_headings)
@@ -504,9 +528,9 @@ def inject_toc(
             toc_xml_parts.append(entry_xml)
 
     # 10. 分节与前哨标记处理
-    # STATIC_RESTART、STATIC_MEASURED 与 DYNAMIC 均需在目录节后注入独立分节符，
-    # 保证正文从第 1 页开始重启编号
-    if config.page_mode in (PageMode.STATIC_RESTART, PageMode.STATIC_MEASURED, PageMode.DYNAMIC):
+    # STATIC_CONTINUOUS、STATIC_RESTART、STATIC_MEASURED 与 DYNAMIC 均在目录节后注入独立分节符，
+    # 隔离目录与正文版式
+    if config.page_mode in (PageMode.STATIC_CONTINUOUS, PageMode.STATIC_RESTART, PageMode.STATIC_MEASURED, PageMode.DYNAMIC):
         toc_sect_p = f"<w:p><w:pPr>{sect_template}</w:pPr></w:p>"
         toc_xml_parts.append(toc_sect_p)
 
@@ -567,6 +591,19 @@ def inject_toc(
         replacements_list.append(
             (target_sect.start(), target_sect.end(), new_sect_str.encode("utf-8"))
         )
+    elif config.page_mode == PageMode.STATIC_CONTINUOUS and sect_matches:
+        # CONTINUOUS 模式下，正文节绝不能带 w:start（否则会重新从 1 开始编号造成末页 299/302）
+        # 若源文档或之前处理残留了 w:pgNumType / w:start，必须予以彻底剥除
+        sect_bytes = target_sect.group(0)
+        sect_str = sect_bytes.decode("utf-8", errors="replace")
+        if "<w:pgNumType" in sect_str:
+            # 移除 w:start 属性；若 pgNumType 只包含 start 则连同标签一起移除
+            new_sect_str = re.sub(r'\s*w:start="[^"]*"', '', sect_str)
+            new_sect_str = re.sub(r'<w:pgNumType\s*/>', '', new_sect_str)
+            if new_sect_str != sect_str:
+                replacements_list.append(
+                    (target_sect.start(), target_sect.end(), new_sect_str.encode("utf-8"))
+                )
 
     # 12. 排序并组装新 document.xml
     replacements_list.sort(key=lambda item: (item[0], item[1]))

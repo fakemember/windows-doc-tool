@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Sequence
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QColor, QDropEvent, QFont, QIcon, QPixmap
+from PySide6.QtGui import QCloseEvent, QColor, QDropEvent, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -52,7 +52,7 @@ from wdt.toc.page_calculator import PageMode
 from wdt.toc.styles_templates import TocStyle
 from wdt.ui.style_preview import StyleCardWidget
 from wdt.ui.theme import APP_STYLESHEET, STATUS_COLORS
-from wdt.ui.worker import PipelineWorker
+from wdt.ui.worker import PdfSplitWorker, PipelineWorker
 
 SUPPORTED_EXTS = (".doc", ".rtf", ".docx")
 
@@ -146,6 +146,7 @@ class MainWindow(QMainWindow):
         self.files_list: list[Path] = []
         self.file_row_map: dict[Path, int] = {}
         self.worker: PipelineWorker | None = None
+        self.split_worker: PdfSplitWorker | None = None
         self.word_engine: WordEngine | None = None
 
         self._init_engine()
@@ -167,12 +168,21 @@ class MainWindow(QMainWindow):
         # 1. 顶部 Header
         root_layout.addWidget(self._build_header_bar())
 
-        # 2. 拖拽投递栏
-        self.drop_area = DropArea(self)
-        root_layout.addWidget(self.drop_area)
+        # 2. 顶层核心多标签页 (流水线处理 / PDF 大纲拆分)
+        self.main_tabs = QTabWidget(central_widget)
+        
+        # Tab 1: 主流水线页 (表格 + 交付卡片 + 底部栏)
+        pipeline_page = QWidget(self.main_tabs)
+        pipeline_layout = QVBoxLayout(pipeline_page)
+        pipeline_layout.setContentsMargins(0, 8, 0, 0)
+        pipeline_layout.setSpacing(10)
 
-        # 3. 中部核心区：左侧文档表格 + 右侧交付控制台
-        splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        # 拖拽投递栏
+        self.drop_area = DropArea(self)
+        pipeline_layout.addWidget(self.drop_area)
+
+        # 中部核心区：左侧文档表格 + 右侧交付控制台
+        splitter = QSplitter(Qt.Orientation.Horizontal, pipeline_page)
         splitter.setChildrenCollapsible(False)
 
         splitter.addWidget(self._build_table_card(splitter))
@@ -181,10 +191,18 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
         splitter.setSizes([680, 440])
-        root_layout.addWidget(splitter, 1)
+        pipeline_layout.addWidget(splitter, 1)
 
-        # 4. 底部执行中枢
-        root_layout.addWidget(self._build_action_bar())
+        # 底部执行中枢
+        pipeline_layout.addWidget(self._build_action_bar())
+
+        self.main_tabs.addTab(pipeline_page, "📑 文档转换与目录编排")
+
+        # Tab 2: PDF 大纲拆分页
+        self.split_page = self._build_pdf_split_tab(self.main_tabs)
+        self.main_tabs.addTab(self.split_page, "✂ PDF 依据大纲拆分")
+
+        root_layout.addWidget(self.main_tabs, 1)
 
         # 底部状态栏
         self.status_bar = QStatusBar(self)
@@ -456,8 +474,9 @@ class MainWindow(QMainWindow):
         params_grid.addWidget(self._form_label("页码重算策略"), 2, 1)
         self.combo_page_mode = QComboBox(self.toc_body_widget)
         self.combo_page_mode.addItems([
-            "静态分节秒开 (首屏极速·正文从1重新编页·推荐)",
+            "全篇连续编号 (正文接续目录·首推·解决299/302末页)",
             "静态页码偏移",
+            "静态分节重启 (正文从1重新编页)",
             "静态原位替换",
             "实测页码",
             "Word 动态域 (打开自动更新字段·大文件卡顿)",
@@ -708,13 +727,14 @@ class MainWindow(QMainWindow):
 
         page_mode_idx = self.combo_page_mode.currentIndex()
         page_mode_map = {
-            0: PageMode.STATIC_RESTART,
+            0: PageMode.STATIC_CONTINUOUS,
             1: PageMode.STATIC_OFFSET,
-            2: PageMode.STATIC_IN_PLACE,
-            3: PageMode.STATIC_MEASURED,
-            4: PageMode.DYNAMIC,
+            2: PageMode.STATIC_RESTART,
+            3: PageMode.STATIC_IN_PLACE,
+            4: PageMode.STATIC_MEASURED,
+            5: PageMode.DYNAMIC,
         }
-        page_mode = page_mode_map.get(page_mode_idx, PageMode.STATIC_RESTART)
+        page_mode = page_mode_map.get(page_mode_idx, PageMode.STATIC_CONTINUOUS)
 
         toc_config = TocConfig(
             style=style,
@@ -888,6 +908,187 @@ class MainWindow(QMainWindow):
 
     def _apply_global_theme(self) -> None:
         self.setStyleSheet(APP_STYLESHEET)
+
+    def _build_pdf_split_tab(self, parent: QWidget) -> QWidget:
+        """构建独立 PDF 依据大纲拆分功能面板。"""
+        tab = QWidget(parent)
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(14)
+
+        card = QFrame(tab)
+        card.setObjectName("settingsCard")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(20, 18, 20, 18)
+        card_layout.setSpacing(14)
+
+        title = QLabel("依据 PDF 顶级大纲与书签智能拆分分卷", card)
+        title.setObjectName("cardTitle")
+        card_layout.addWidget(title)
+
+        desc = QLabel(
+            "针对超过几百甚至上千页的超大 TFL/CSR 发布 PDF，依据一级大纲书签和单卷最大页数限制，\n"
+            "将大 PDF 智能切分成独立分卷，并自动为每个分卷重新构建带原页码映射的可视目录与精确卷内书签。",
+            card,
+        )
+        desc.setObjectName("hintLabel")
+        card_layout.addWidget(desc)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(12)
+
+        # PDF 文件选择
+        grid.addWidget(self._form_label("源 PDF 文件:"), 0, 0)
+        file_row = QHBoxLayout()
+        self.edit_split_pdf = QLineEdit(card)
+        self.edit_split_pdf.setPlaceholderText("选择或拖入待拆分的 PDF 文件…")
+        file_row.addWidget(self.edit_split_pdf, 1)
+        btn_browse_pdf = QPushButton("浏览…", card)
+        btn_browse_pdf.clicked.connect(self._on_browse_split_pdf)
+        file_row.addWidget(btn_browse_pdf)
+        grid.addLayout(file_row, 0, 1)
+
+        # 输出目录选择
+        grid.addWidget(self._form_label("输出分卷目录:"), 1, 0)
+        out_row = QHBoxLayout()
+        self.edit_split_outdir = QLineEdit(card)
+        self.edit_split_outdir.setPlaceholderText("留空则默认在 PDF 同级创建 _split 目录")
+        out_row.addWidget(self.edit_split_outdir, 1)
+        btn_browse_split_out = QPushButton("浏览…", card)
+        btn_browse_split_out.clicked.connect(self._on_browse_split_outdir)
+        out_row.addWidget(btn_browse_split_out)
+        grid.addLayout(out_row, 1, 1)
+
+        # 单卷最大页数
+        grid.addWidget(self._form_label("单卷最大页数限制:"), 2, 0)
+        spin_row = QHBoxLayout()
+        self.spin_split_max_pages = QSpinBox(card)
+        self.spin_split_max_pages.setRange(20, 5000)
+        self.spin_split_max_pages.setValue(150)
+        self.spin_split_max_pages.setSuffix(" 页 / 卷")
+        spin_row.addWidget(self.spin_split_max_pages)
+
+        self.chk_split_visual_toc = QCheckBox("生成分卷独立可视目录页 (Visual TOC)", card)
+        self.chk_split_visual_toc.setChecked(True)
+        spin_row.addWidget(self.chk_split_visual_toc)
+        spin_row.addStretch()
+        grid.addLayout(spin_row, 2, 1)
+
+        card_layout.addLayout(grid)
+        layout.addWidget(card)
+
+        # 进度与执行反馈
+        split_action_card = QFrame(tab)
+        split_action_card.setObjectName("actionBar")
+        act_layout = QHBoxLayout(split_action_card)
+        act_layout.setContentsMargins(16, 12, 16, 12)
+        act_layout.setSpacing(14)
+
+        prog_col = QVBoxLayout()
+        prog_col.setSpacing(4)
+        self.split_progress_bar = QProgressBar(split_action_card)
+        self.split_progress_bar.setRange(0, 100)
+        self.split_progress_bar.setValue(0)
+        self.split_progress_bar.setFixedHeight(22)
+        self.split_status_label = QLabel("准备就绪。选择 PDF 后点击「开始拆分」启动处理。", split_action_card)
+        self.split_status_label.setObjectName("hintLabel")
+        prog_col.addWidget(self.split_progress_bar)
+        prog_col.addWidget(self.split_status_label)
+        act_layout.addLayout(prog_col, 1)
+
+        self.btn_start_split = QPushButton("✂ 开始拆分", split_action_card)
+        self.btn_start_split.setObjectName("btnStart")
+        self.btn_start_split.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_start_split.setFixedHeight(42)
+        self.btn_start_split.setFixedWidth(140)
+        self.btn_start_split.clicked.connect(self._on_start_split)
+        act_layout.addWidget(self.btn_start_split)
+
+        layout.addWidget(split_action_card)
+        layout.addStretch()
+        return tab
+
+    def _on_browse_split_pdf(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择待拆分的 PDF 文件",
+            "",
+            "PDF 文档 (*.pdf);;全部文件 (*.*)",
+        )
+        if path:
+            self.edit_split_pdf.setText(path)
+
+    def _on_browse_split_outdir(self) -> None:
+        dir_path = QFileDialog.getExistingDirectory(self, "选择分卷输出目录")
+        if dir_path:
+            self.edit_split_outdir.setText(dir_path)
+
+    def _on_start_split(self) -> None:
+        pdf_str = self.edit_split_pdf.text().strip()
+        if not pdf_str:
+            QMessageBox.warning(self, "提示", "请先选择需要拆分的源 PDF 文件。")
+            return
+        pdf_path = Path(pdf_str).resolve()
+        if not pdf_path.is_file():
+            QMessageBox.warning(self, "错误", f"指定的 PDF 文件不存在:\n{pdf_path}")
+            return
+
+        outdir_str = self.edit_split_outdir.text().strip()
+        out_dir = Path(outdir_str).resolve() if outdir_str else None
+        max_p = self.spin_split_max_pages.value()
+        visual_toc = self.chk_split_visual_toc.isChecked()
+
+        self.btn_start_split.setEnabled(False)
+        self.split_progress_bar.setValue(10)
+        self.split_status_label.setText(f"正在分析大纲与分卷规划: {pdf_path.name}…")
+
+        self.split_worker = PdfSplitWorker(
+            pdf_path=pdf_path,
+            out_dir=out_dir,
+            max_pages=max_p,
+            with_visual_toc=visual_toc,
+            parent=self,
+        )
+        self.split_worker.progress_signal.connect(self._on_split_progress)
+        self.split_worker.finished_signal.connect(self._on_split_finished)
+        self.split_worker.error_signal.connect(self._on_split_error)
+        self.split_worker.start()
+
+    def _on_split_progress(self, cur: int, total: int, msg: str) -> None:
+        self.split_progress_bar.setValue(cur)
+        self.split_status_label.setText(msg)
+
+    def _on_split_finished(self, results: list) -> None:
+        self.btn_start_split.setEnabled(True)
+        self.split_progress_bar.setValue(100)
+        if not results:
+            msg = "未生成拆分分卷，请检查文档是否包含有效内容或大纲。"
+            self.split_status_label.setText(msg)
+            QMessageBox.warning(self, "拆分结果", msg)
+            return
+
+        msg = f"🎉 拆分成功！共生成 {len(results)} 个独立分卷。\n保存在: {results[0].output_path.parent}"
+        self.split_status_label.setText(f"✓ 拆分成功！生成 {len(results)} 个分卷。")
+        QMessageBox.information(self, "拆分完成", msg)
+
+    def _on_split_error(self, err_text: str) -> None:
+        self.btn_start_split.setEnabled(True)
+        self.split_progress_bar.setValue(0)
+        self.split_status_label.setText(f"✗ 拆分失败: {err_text}")
+        QMessageBox.critical(self, "拆分异常", f"PDF 拆分过程发生异常:\n{err_text}")
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """窗口关闭时安全退出正在执行的工作线程，避免残留或损坏文件。"""
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.cancel()
+            self.worker.wait(2000)
+
+        if self.split_worker is not None and self.split_worker.isRunning():
+            self.split_worker.requestInterruption()
+            self.split_worker.wait(2000)
+
+        event.accept()
 
 
 def launch_gui() -> int:

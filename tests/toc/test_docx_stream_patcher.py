@@ -441,3 +441,27 @@ def test_body_font_detection_and_tab_pos(tmp_path: Path):
     assert 'w:eastAsia="SimHei"' in doc_str
     # 默认 A4: 11906 - 1440 - 1440 = 9026
     assert 'w:pos="8906"' in doc_str
+
+
+def test_continuous_clears_existing_pgnumtype(tmp_path: Path):
+    """验证 STATIC_CONTINUOUS 模式下，若正文节已存在 w:pgNumType w:start="1"，会被彻底清除以保证连续页码"""
+    docx_file = tmp_path / "test_continuous_strip.docx"
+    build_docx(
+        docx_file,
+        [
+            {"text": "标题一", "pstyle": "Heading1"},
+            {"text": "正文内容"},
+        ],
+    )
+
+    # 1. 先用 STATIC_RESTART 模式注入，使正文节产生 w:pgNumType w:start="1"
+    inject_toc(docx_file, TocConfig(page_mode=PageMode.STATIC_RESTART, title="目录1"))
+    doc_str, _, _ = _read_docx_xmls(docx_file)
+    assert 'w:start="1"' in doc_str
+
+    # 2. 再次用默认 STATIC_CONTINUOUS 模式注入，验证 w:start="1" 被彻底剥除
+    inject_toc(docx_file, TocConfig(page_mode=PageMode.STATIC_CONTINUOUS, title="目录2"))
+    doc_str2, _, _ = _read_docx_xmls(docx_file)
+    ET.fromstring(doc_str2)
+    assert 'w:start="1"' not in doc_str2
+
