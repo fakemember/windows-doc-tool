@@ -459,11 +459,12 @@ class MainWindow(QMainWindow):
 
         # PDF 模式选择区
         self.pdf_mode_box = QFrame(card)
+        self.pdf_mode_box.setObjectName("pdfModeBox")
         self.pdf_mode_box.setStyleSheet(
-            "background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px; padding: 6px 8px;"
+            "QFrame#pdfModeBox { background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px; }"
         )
         pdf_mode_layout = QVBoxLayout(self.pdf_mode_box)
-        pdf_mode_layout.setContentsMargins(4, 4, 4, 4)
+        pdf_mode_layout.setContentsMargins(8, 6, 8, 6)
         pdf_mode_layout.setSpacing(4)
 
         mode_header = QLabel("PDF 导出速度与质量：", self.pdf_mode_box)
@@ -565,8 +566,9 @@ class MainWindow(QMainWindow):
         body_layout.addWidget(self.btn_toggle_advanced)
 
         self.advanced_box = QFrame(self.toc_body_widget)
+        self.advanced_box.setObjectName("advancedBox")
         self.advanced_box.setStyleSheet(
-            "background: #F8FAFC; border: 1px dashed #CBD5E1; border-radius: 6px; padding: 6px;"
+            "QFrame#advancedBox { background: #F8FAFC; border: 1px dashed #CBD5E1; border-radius: 6px; }"
         )
         self.advanced_box.setVisible(False)
         self.btn_toggle_advanced.clicked.connect(self._toggle_advanced_options)
