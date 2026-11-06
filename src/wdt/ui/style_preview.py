@@ -25,6 +25,25 @@ from PySide6.QtWidgets import (
 from wdt.toc.styles_templates import TocStyle
 
 
+def _draw_vector_search_icon(size: int = 16) -> QIcon:
+    """使用 QPainter 绘制跨系统与字体 100% 保证高清晰度渲染的矢量放大镜图标。"""
+    pix = QPixmap(size * 2, size * 2)
+    pix.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.scale(2.0, 2.0)
+    pen = QPen(QColor("#475569"), 1.8)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    # 放大镜圆环
+    painter.drawEllipse(QPointF(6.5, 6.5), 4.2, 4.2)
+    # 放大镜手柄
+    painter.drawLine(QPointF(9.8, 9.8), QPointF(14.0, 14.0))
+    painter.end()
+    return QIcon(pix)
+
+
 def draw_style_preview(
     style: TocStyle,
     width: int = 240,
@@ -255,11 +274,12 @@ class StyleCardWidget(QFrame):
         self.radio.setStyleSheet("font-weight: 600; font-size: 11px; background: transparent; color: #1E293B;")
         bottom_row.addWidget(self.radio, 1)
 
-        self.btn_zoom = QPushButton("🔍", self)
+        self.btn_zoom = QPushButton(self)
+        self.btn_zoom.setIcon(_draw_vector_search_icon(16))
         self.btn_zoom.setFixedSize(22, 22)
         self.btn_zoom.setToolTip("放大查看高清样式细节")
         self.btn_zoom.setStyleSheet(
-            "QPushButton { border: none; background: #E2E8F0; border-radius: 4px; font-size: 10px; }"
+            "QPushButton { border: none; background: #E2E8F0; border-radius: 4px; padding: 2px; }"
             "QPushButton:hover { background: #CBD5E1; }"
         )
         self.btn_zoom.clicked.connect(self._open_zoom_dialog)

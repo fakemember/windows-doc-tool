@@ -42,10 +42,12 @@ QWidget {{
     color: {COLOR_TEXT};
 }}
 QToolTip {{
-    background-color: {COLOR_TEXT_TITLE};
-    color: #FFFFFF;
-    border: none;
-    padding: 4px 8px;
+    background-color: #1E293B;
+    color: #F8FAFC;
+    border: 1px solid #475569;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 12px;
 }}
 
 /* ---------- 卡片容器 ---------- */

@@ -1053,7 +1053,11 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "执行异常", f"流水线异常中断:\n{err_text}")
 
     def _apply_global_theme(self) -> None:
-        self.setStyleSheet(APP_STYLESHEET)
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(APP_STYLESHEET)
+        else:
+            self.setStyleSheet(APP_STYLESHEET)
 
     def _build_pdf_split_tab(self, parent: QWidget) -> QWidget:
         """构建独立 PDF 依据大纲拆分功能面板。"""
