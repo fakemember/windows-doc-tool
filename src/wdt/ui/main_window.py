@@ -244,7 +244,7 @@ class MainWindow(QMainWindow):
         brand_text.setSpacing(1)
         brand_title = QLabel("TFLOW", header_bar)
         brand_title.setStyleSheet("font-size: 16px; font-weight: 800; color: #0F172A; letter-spacing: 0.5px;")
-        brand_sub = QLabel("Clinical TFL & Document Pipeline · 纯原生 Word COM 自动化引擎", header_bar)
+        brand_sub = QLabel("临床文档自动化处理中枢 · 格式转换、目录编排与 PDF 智能拆分", header_bar)
         brand_sub.setStyleSheet("font-size: 11px; color: #64748B; font-weight: 500;")
         brand_text.addWidget(brand_title)
         brand_text.addWidget(brand_sub)
@@ -343,7 +343,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(10)
 
-        title = QLabel("1. 目标交付物 (Deliverables)", card)
+        title = QLabel("1. 目标交付物", card)
         title.setObjectName("cardTitle")
         layout.addWidget(title)
 
@@ -351,18 +351,14 @@ class MainWindow(QMainWindow):
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(8)
 
-        # 源文档目录情况：决定整体处理路径
-        self.radio_src_no_toc = QRadioButton("原文档无目录 → 目录编排流水线", card)
+        # 源文档目录情况：隐藏底层技术路由术语，改为清晰简短的选项
+        self.radio_src_no_toc = QRadioButton("全新编排（自动提取标题并生成目录）", card)
         self.radio_src_no_toc.setChecked(True)
         self.radio_src_no_toc.setStyleSheet("font-weight: 600; font-size: 13px;")
-        self.radio_src_no_toc.setToolTip(
-            "走完整流水线：Word COM 转换 DOCX → 注入格式化目录 → 按勾选交付 DOCX / PDF"
-        )
-        self.radio_src_has_toc = QRadioButton("原文档已有目录 → 直接转 PDF", card)
+
+        self.radio_src_has_toc = QRadioButton("已有目录（跳过目录，直接转格式）", card)
         self.radio_src_has_toc.setStyleSheet("font-weight: 600; font-size: 13px; color: #1D4ED8;")
-        self.radio_src_has_toc.setToolTip(
-            "源文档已带目录（如 SAS 输出已生成的 Table of Content）：跳过目录编排，Word COM 直接转换为 PDF"
-        )
+
         self.src_toc_group = QButtonGroup(self)
         self.src_toc_group.addButton(self.radio_src_no_toc, 0)
         self.src_toc_group.addButton(self.radio_src_has_toc, 1)
@@ -370,15 +366,15 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.radio_src_no_toc, 0, 0)
         grid.addWidget(self.radio_src_has_toc, 0, 1)
 
-        self.chk_docx = QCheckBox("生成规范化 DOCX", card)
+        self.chk_docx = QCheckBox("输出 Word (DOCX)", card)
         self.chk_docx.setChecked(True)
         self.chk_docx.setStyleSheet("font-weight: 600; font-size: 13px;")
 
-        self.chk_pdf = QCheckBox("导出最终发布 PDF", card)
+        self.chk_pdf = QCheckBox("输出 PDF (推荐)", card)
         self.chk_pdf.setChecked(True)
         self.chk_pdf.setStyleSheet("font-weight: 600; font-size: 13px; color: #1D4ED8;")
 
-        self.chk_force = QCheckBox("覆盖已有目标文件", card)
+        self.chk_force = QCheckBox("覆盖已有同名文件", card)
         self.chk_force.setChecked(True)
 
         grid.addWidget(self.chk_docx, 1, 0)
@@ -389,25 +385,25 @@ class MainWindow(QMainWindow):
         # PDF 模式选择区
         self.pdf_mode_box = QFrame(card)
         self.pdf_mode_box.setStyleSheet(
-            "background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px; padding: 4px;"
+            "background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px; padding: 6px 8px;"
         )
         pdf_mode_layout = QVBoxLayout(self.pdf_mode_box)
-        pdf_mode_layout.setContentsMargins(8, 6, 8, 6)
+        pdf_mode_layout.setContentsMargins(4, 4, 4, 4)
         pdf_mode_layout.setSpacing(4)
 
-        mode_header = QLabel("PDF 导出与页码校准模式：", self.pdf_mode_box)
+        mode_header = QLabel("PDF 导出速度与质量：", self.pdf_mode_box)
         mode_header.setStyleSheet("font-size: 11px; font-weight: 600; color: #475569;")
         pdf_mode_layout.addWidget(mode_header)
 
         mode_btn_layout = QHBoxLayout()
-        mode_btn_layout.setSpacing(12)
+        mode_btn_layout.setSpacing(16)
 
-        self.radio_pdf_fast = QRadioButton("⚡ 极速审阅模式 (直出秒级耗时·推荐草稿)", self.pdf_mode_box)
+        self.radio_pdf_fast = QRadioButton("⚡ 极速模式 (日常审阅·推荐)", self.pdf_mode_box)
         self.radio_pdf_fast.setChecked(True)
-        self.radio_pdf_fast.setToolTip("基于 DOCX 静态版面快速输出，跳过全量长表格重排，耗时缩短 60%+")
+        self.radio_pdf_fast.setToolTip("基于当前版面直接快速输出，适合绝大部分日常查看，速度最快。")
 
-        self.radio_pdf_strict = QRadioButton("🛡️ 申报对齐模式 (Word逐页深度校准·提交级)", self.pdf_mode_box)
-        self.radio_pdf_strict.setToolTip("Word 引擎逐页物理校准，计算自然跨页表格与精准页码，大文档需较长时间但页码 100% 对齐")
+        self.radio_pdf_strict = QRadioButton("🛡️ 精确模式 (申报提交级)", self.pdf_mode_box)
+        self.radio_pdf_strict.setToolTip("Word 逐页物理排版校准，大表格跨页对齐更严谨，耗时稍长。")
 
         self.pdf_mode_group = QButtonGroup(self)
         self.pdf_mode_group.addButton(self.radio_pdf_fast, 1)
@@ -430,12 +426,12 @@ class MainWindow(QMainWindow):
         layout.setSpacing(10)
 
         header_row = QHBoxLayout()
-        title = QLabel("2. 目录排版规范 (TOC Enhancement)", self.toc_card)
+        title = QLabel("2. 目录样式与编排", self.toc_card)
         title.setObjectName("cardTitle")
         header_row.addWidget(title)
         header_row.addStretch()
 
-        self.chk_enable_toc = QCheckBox("启用目录", self.toc_card)
+        self.chk_enable_toc = QCheckBox("生成目录", self.toc_card)
         self.chk_enable_toc.setChecked(True)
         self.chk_enable_toc.toggled.connect(self._on_toc_toggle)
         header_row.addWidget(self.chk_enable_toc)
@@ -451,9 +447,9 @@ class MainWindow(QMainWindow):
         cards_grid.setContentsMargins(0, 0, 0, 0)
         cards_grid.setSpacing(8)
 
-        self.card_classic = StyleCardWidget(TocStyle.CLASSIC_DOT, "经典点线 (CSR申报)", self.toc_body_widget)
-        self.card_modern = StyleCardWidget(TocStyle.MODERN_ACCENT, "现代商务 (推荐)", self.toc_body_widget)
-        self.card_regulatory = StyleCardWidget(TocStyle.REGULATORY_LISTING, "临床紧凑 (TFL汇编)", self.toc_body_widget)
+        self.card_classic = StyleCardWidget(TocStyle.CLASSIC_DOT, "经典点线 (默认推荐)", self.toc_body_widget)
+        self.card_modern = StyleCardWidget(TocStyle.MODERN_ACCENT, "现代商务", self.toc_body_widget)
+        self.card_regulatory = StyleCardWidget(TocStyle.REGULATORY_LISTING, "紧凑汇编", self.toc_body_widget)
         self.card_minimal = StyleCardWidget(TocStyle.MINIMAL_CLEAN, "极简纯净", self.toc_body_widget)
 
         self.style_group = QButtonGroup(self)
@@ -469,7 +465,7 @@ class MainWindow(QMainWindow):
         cards_grid.addWidget(self.card_minimal, 1, 1)
         body_layout.addLayout(cards_grid)
 
-        # 参数网格
+        # 常用直观参数（仅保留最核心的：目录标题和收集层级）
         params_grid = QGridLayout()
         params_grid.setHorizontalSpacing(10)
         params_grid.setVerticalSpacing(8)
@@ -480,44 +476,65 @@ class MainWindow(QMainWindow):
 
         params_grid.addWidget(self._form_label("标题收集层级"), 0, 1)
         self.combo_depth = QComboBox(self.toc_body_widget)
-        self.combo_depth.addItems(["仅 1 级大标题", "1 ~ 2 级标题", "1 ~ 3 级全量标题"])
+        self.combo_depth.addItems(["仅 1 级大标题", "1 ~ 2 级标题", "1 ~ 3 级全量标题 (推荐)"])
         self.combo_depth.setCurrentIndex(2)  # 默认 1-3 级
         params_grid.addWidget(self.combo_depth, 1, 1)
+        body_layout.addLayout(params_grid)
 
-        params_grid.addWidget(self._form_label("插入位置"), 2, 0)
-        self.combo_position = QComboBox(self.toc_body_widget)
-        self.combo_position.addItems(["文档开头", "首个标题前", "原位替换占位符"])
-        self.combo_position.setCurrentIndex(1)  # 默认首个标题前
-        params_grid.addWidget(self.combo_position, 3, 0)
+        # 高级选项可折叠区域（消除绝大多数用户的认知负担）
+        self.btn_toggle_advanced = QPushButton("▸ 高级排版选项 (通常无需修改)", self.toc_body_widget)
+        self.btn_toggle_advanced.setStyleSheet(
+            "text-align: left; background: transparent; border: none; color: #64748B; font-size: 11px; padding: 2px 0;"
+        )
+        self.btn_toggle_advanced.setCursor(Qt.CursorShape.PointingHandCursor)
+        body_layout.addWidget(self.btn_toggle_advanced)
 
-        params_grid.addWidget(self._form_label("页码重算策略"), 2, 1)
-        self.combo_page_mode = QComboBox(self.toc_body_widget)
+        self.advanced_box = QFrame(self.toc_body_widget)
+        self.advanced_box.setStyleSheet(
+            "background: #F8FAFC; border: 1px dashed #CBD5E1; border-radius: 6px; padding: 6px;"
+        )
+        self.advanced_box.setVisible(False)
+        self.btn_toggle_advanced.clicked.connect(self._toggle_advanced_options)
+
+        adv_layout = QGridLayout(self.advanced_box)
+        adv_layout.setHorizontalSpacing(10)
+        adv_layout.setVerticalSpacing(6)
+
+        adv_layout.addWidget(self._form_label("插入位置"), 0, 0)
+        self.combo_position = QComboBox(self.advanced_box)
+        self.combo_position.addItems(["文档开头", "首个标题前 (默认)", "原位替换占位符"])
+        self.combo_position.setCurrentIndex(1)
+        adv_layout.addWidget(self.combo_position, 1, 0)
+
+        adv_layout.addWidget(self._form_label("页码编号策略"), 0, 1)
+        self.combo_page_mode = QComboBox(self.advanced_box)
         self.combo_page_mode.addItems([
-            "全篇连续编号 (正文接续目录·首推·解决299/302末页)",
+            "全篇连续编号 (正文接续目录·推荐)",
             "静态页码偏移",
             "静态分节重启 (正文从1重新编页)",
             "静态原位替换",
             "实测页码",
-            "Word 动态域 (打开自动更新字段·大文件卡顿)",
+            "Word 动态域 (打开时更新)",
         ])
         self.combo_page_mode.setCurrentIndex(0)
-        params_grid.addWidget(self.combo_page_mode, 3, 1)
+        adv_layout.addWidget(self.combo_page_mode, 1, 1)
 
         offset_row = QHBoxLayout()
         offset_row.setSpacing(8)
-        self.spin_offset = QSpinBox(self.toc_body_widget)
+        self.spin_offset = QSpinBox(self.advanced_box)
         self.spin_offset.setRange(-999, 9999)
         self.spin_offset.setValue(0)
         offset_row.addWidget(self.spin_offset, 1)
 
-        self.chk_backup = QCheckBox("保留原始备份 (.bak)", self.toc_body_widget)
+        self.chk_backup = QCheckBox("保留原始副本 (.bak)", self.advanced_box)
         self.chk_backup.setChecked(False)
         offset_row.addWidget(self.chk_backup)
 
-        params_grid.addWidget(self._form_label("起始页码偏移"), 4, 0)
-        params_grid.addLayout(offset_row, 5, 0, 1, 2)
+        adv_layout.addWidget(self._form_label("页码偏移"), 2, 0)
+        adv_layout.addLayout(offset_row, 3, 0, 1, 2)
 
-        body_layout.addLayout(params_grid)
+        body_layout.addWidget(self.advanced_box)
+
         layout.addWidget(self.toc_body_widget)
         return self.toc_card
 
@@ -631,6 +648,12 @@ class MainWindow(QMainWindow):
 
     def _on_toc_toggle(self, checked: bool) -> None:
         self.toc_body_widget.setVisible(checked)
+
+    def _toggle_advanced_options(self) -> None:
+        visible = not self.advanced_box.isVisible()
+        self.advanced_box.setVisible(visible)
+        arrow = "▾" if visible else "▸"
+        self.btn_toggle_advanced.setText(f"{arrow} 高级排版选项 (通常无需修改)")
 
     def _on_browse_outdir(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "选择输出归档目录")
@@ -970,13 +993,13 @@ class MainWindow(QMainWindow):
         card_layout.setContentsMargins(20, 18, 20, 18)
         card_layout.setSpacing(14)
 
-        title = QLabel("依据 PDF 顶级大纲与书签智能拆分分卷", card)
+        title = QLabel("超大 PDF 智能拆分分卷", card)
         title.setObjectName("cardTitle")
         card_layout.addWidget(title)
 
         desc = QLabel(
-            "针对超过几百甚至上千页的超大 TFL/CSR 发布 PDF，依据一级大纲书签和单卷最大页数限制，\n"
-            "将大 PDF 智能切分成独立分卷，并自动为每个分卷重新构建带原页码映射的可视目录与精确卷内书签。",
+            "针对上百甚至上千页的大型 PDF，自动依据大纲目录将文档智能拆分为合适大小的独立分卷，\n"
+            "并自动为各卷生成卷内目录与可跳转书签。",
             card,
         )
         desc.setObjectName("hintLabel")
@@ -987,7 +1010,7 @@ class MainWindow(QMainWindow):
         grid.setVerticalSpacing(12)
 
         # PDF 文件选择
-        grid.addWidget(self._form_label("源 PDF 文件:"), 0, 0)
+        grid.addWidget(self._form_label("待拆分 PDF:"), 0, 0)
         file_row = QHBoxLayout()
         self.edit_split_pdf = QLineEdit(card)
         self.edit_split_pdf.setPlaceholderText("选择或拖入待拆分的 PDF 文件…")
@@ -998,10 +1021,10 @@ class MainWindow(QMainWindow):
         grid.addLayout(file_row, 0, 1)
 
         # 输出目录选择
-        grid.addWidget(self._form_label("输出分卷目录:"), 1, 0)
+        grid.addWidget(self._form_label("保存位置:"), 1, 0)
         out_row = QHBoxLayout()
         self.edit_split_outdir = QLineEdit(card)
-        self.edit_split_outdir.setPlaceholderText("留空则默认在 PDF 同级创建 _split 目录")
+        self.edit_split_outdir.setPlaceholderText("留空默认保存在原 PDF 所在目录的 _split 文件夹")
         out_row.addWidget(self.edit_split_outdir, 1)
         btn_browse_split_out = QPushButton("浏览…", card)
         btn_browse_split_out.clicked.connect(self._on_browse_split_outdir)
@@ -1009,15 +1032,15 @@ class MainWindow(QMainWindow):
         grid.addLayout(out_row, 1, 1)
 
         # 单卷最大页数
-        grid.addWidget(self._form_label("单卷最大页数限制:"), 2, 0)
+        grid.addWidget(self._form_label("分卷容量上限:"), 2, 0)
         spin_row = QHBoxLayout()
         self.spin_split_max_pages = QSpinBox(card)
         self.spin_split_max_pages.setRange(20, 5000)
         self.spin_split_max_pages.setValue(150)
-        self.spin_split_max_pages.setSuffix(" 页 / 卷")
+        self.spin_split_max_pages.setSuffix(" 页 / 卷 (推荐)")
         spin_row.addWidget(self.spin_split_max_pages)
 
-        self.chk_split_visual_toc = QCheckBox("生成分卷独立可视目录页 (Visual TOC)", card)
+        self.chk_split_visual_toc = QCheckBox("生成分卷卷首可视目录页 (可点击跳转)", card)
         self.chk_split_visual_toc.setChecked(True)
         spin_row.addWidget(self.chk_split_visual_toc)
         spin_row.addStretch()
