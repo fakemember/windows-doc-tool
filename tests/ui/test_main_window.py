@@ -203,3 +203,26 @@ def test_missing_word_engine_dialog_interception(tmp_path: Path, main_window, mo
 
     assert alert_called is True
     assert main_window.worker is None
+
+
+def test_ui_source_has_toc_direct_pdf(main_window):
+    """原文档已有目录 → 直接转 PDF：convert 模式，不产出 DOCX，目录编排被跳过。"""
+    main_window.radio_src_has_toc.setChecked(True)
+
+    opts = main_window.get_pipeline_options()
+    assert opts.mode == "convert"
+    assert opts.make_docx is False
+    assert opts.make_pdf is True
+
+    # 目录编排被禁用
+    assert main_window.chk_enable_toc.isChecked() is False
+    assert main_window.chk_enable_toc.isEnabled() is False
+    assert main_window.chk_docx.isEnabled() is False
+
+    # 切回无目录：恢复流水线默认值
+    main_window.radio_src_no_toc.setChecked(True)
+    opts2 = main_window.get_pipeline_options()
+    assert opts2.mode == "run"
+    assert opts2.make_docx is True
+    assert opts2.make_pdf is True
+    assert main_window.chk_enable_toc.isChecked() is True

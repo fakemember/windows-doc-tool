@@ -351,6 +351,25 @@ class MainWindow(QMainWindow):
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(8)
 
+        # 源文档目录情况：决定整体处理路径
+        self.radio_src_no_toc = QRadioButton("原文档无目录 → 目录编排流水线", card)
+        self.radio_src_no_toc.setChecked(True)
+        self.radio_src_no_toc.setStyleSheet("font-weight: 600; font-size: 13px;")
+        self.radio_src_no_toc.setToolTip(
+            "走完整流水线：Word COM 转换 DOCX → 注入格式化目录 → 按勾选交付 DOCX / PDF"
+        )
+        self.radio_src_has_toc = QRadioButton("原文档已有目录 → 直接转 PDF", card)
+        self.radio_src_has_toc.setStyleSheet("font-weight: 600; font-size: 13px; color: #1D4ED8;")
+        self.radio_src_has_toc.setToolTip(
+            "源文档已带目录（如 SAS 输出已生成的 Table of Content）：跳过目录编排，Word COM 直接转换为 PDF"
+        )
+        self.src_toc_group = QButtonGroup(self)
+        self.src_toc_group.addButton(self.radio_src_no_toc, 0)
+        self.src_toc_group.addButton(self.radio_src_has_toc, 1)
+        self.radio_src_no_toc.toggled.connect(self._on_source_toc_changed)
+        grid.addWidget(self.radio_src_no_toc, 0, 0)
+        grid.addWidget(self.radio_src_has_toc, 0, 1)
+
         self.chk_docx = QCheckBox("生成规范化 DOCX", card)
         self.chk_docx.setChecked(True)
         self.chk_docx.setStyleSheet("font-weight: 600; font-size: 13px;")
@@ -362,9 +381,9 @@ class MainWindow(QMainWindow):
         self.chk_force = QCheckBox("覆盖已有目标文件", card)
         self.chk_force.setChecked(True)
 
-        grid.addWidget(self.chk_docx, 0, 0)
-        grid.addWidget(self.chk_pdf, 0, 1)
-        grid.addWidget(self.chk_force, 1, 0, 1, 2)
+        grid.addWidget(self.chk_docx, 1, 0)
+        grid.addWidget(self.chk_pdf, 1, 1)
+        grid.addWidget(self.chk_force, 2, 0, 1, 2)
         layout.addLayout(grid)
 
         # PDF 模式选择区
@@ -597,6 +616,19 @@ class MainWindow(QMainWindow):
         self._init_engine()
         self._update_engine_pill()
 
+    def _on_source_toc_changed(self) -> None:
+        """源文档目录情况切换：已有目录 → 跳过目录编排，直接转 PDF。"""
+        has_toc = self.radio_src_has_toc.isChecked()
+        self.chk_enable_toc.setEnabled(not has_toc)
+        self.chk_docx.setEnabled(not has_toc)
+        if has_toc:
+            self.chk_enable_toc.setChecked(False)
+            self.chk_docx.setChecked(False)
+            self.chk_pdf.setChecked(True)
+        else:
+            self.chk_enable_toc.setChecked(True)
+            self.chk_docx.setChecked(True)
+
     def _on_toc_toggle(self, checked: bool) -> None:
         self.toc_body_widget.setVisible(checked)
 
@@ -747,12 +779,22 @@ class MainWindow(QMainWindow):
         )
 
         # 模式自适应判定：兼容单元测试以及纯交付目标驱动
-        if self.radio_mode_conv.isChecked() or (not self.chk_enable_toc.isChecked()):
+        if self.radio_src_has_toc.isChecked():
+            # 原文档已有目录：跳过目录编排，Word COM 直接转 PDF
             mode = "convert"
-        elif self.radio_mode_toc.isChecked():
-            mode = "toc"
+            make_docx = False
+            make_pdf = True
         else:
-            mode = "run"
+            if self.radio_mode_conv.isChecked() or (not self.chk_enable_toc.isChecked()):
+                mode = "convert"
+            elif self.radio_mode_toc.isChecked():
+                mode = "toc"
+            else:
+                mode = "run"
+            make_docx = self.chk_docx.isChecked()
+            make_pdf = self.chk_pdf.isChecked()
+            if mode == "convert" and not make_docx and not make_pdf:
+                raise ValueError("请至少勾选一种交付物（DOCX 或 PDF）")
 
         pdf_mode: Literal["fast", "strict"] = (
             "strict" if self.radio_pdf_strict.isChecked() else "fast"
@@ -761,8 +803,8 @@ class MainWindow(QMainWindow):
         return PipelineOptions(
             mode=mode,  # type: ignore[arg-type]
             out_dir=out_dir,
-            make_docx=self.chk_docx.isChecked(),
-            make_pdf=self.chk_pdf.isChecked(),
+            make_docx=make_docx,
+            make_pdf=make_pdf,
             toc=toc_config,
             jobs=self.spin_jobs.value(),
             force=self.chk_force.isChecked(),
@@ -811,7 +853,13 @@ class MainWindow(QMainWindow):
             if item_el:
                 item_el.setText("-")
 
-        events_per_file = 3 if options.make_pdf else 2
+        if options.mode == "convert":
+            events_per_file = int(options.make_docx) + int(options.make_pdf)
+        elif options.mode == "toc":
+            events_per_file = 1
+        else:
+            events_per_file = 2 + int(options.make_pdf)
+        events_per_file = max(1, events_per_file)
         total_steps = max(1, len(self.files_list) * events_per_file)
         self.progress_bar.setRange(0, total_steps)
         self.progress_bar.setValue(0)

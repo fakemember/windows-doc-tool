@@ -24,7 +24,8 @@ from wdt.toc.page_measurer import build_heading_anchor_xml, build_sentinel_xml
 from wdt.toc.styles_templates import HYPERLINK_STYLE_ID, TocStyle, toc_styles_fragment
 from wdt.toc.zip_rewriter import rewrite_zip
 
-# 默认目录每页约容纳 38 行（基于 Times New Roman 9-10pt、单倍/紧凑行距的正文目录排版基准）
+# 默认目录每页约容纳 38 行（基准版心高 11187 twips = SAS landscape 正文节 11907 - 上 432 - 下 288，
+# Times New Roman 9-10pt、紧凑行距，已实测验证；其余版式由 _toc_lines_per_page 按版心高等比换算）
 # 真实场景中，如遇多行标题折行或宽行距，可由调用方传入 explicit page_offset 进行覆写
 TOC_LINES_PER_PAGE_DEFAULT = 38
 
@@ -312,6 +313,70 @@ def _build_dynamic_toc_xml(depth: int) -> str:
     )
 
 
+# 模板目录标题页标题文本特征（公司模板预留的 portrait 目录占位页）
+_TOC_TITLE_TEXT = ("Table of Content", "目录")
+
+
+def _find_leading_toc_title_page(
+    doc_bytes: bytes, body_end: int, first_heading_pos: int
+) -> tuple[int, int, bytes, bytes] | None:
+    """在文首首个标题之前查找独占一个 portrait 节的目录标题占位页。
+
+    返回 (段落起始, 段落结束, 段落内 sectPr 字节, 去除 sectPr 后的段落字节)；
+    未找到时返回 None。
+    """
+    region = doc_bytes[body_end:first_heading_pos]
+    for m in re.finditer(rb"<w:p\b[^>]*>.*?</w:p>", region, re.DOTALL):
+        seg = m.group(0)
+        sm = re.search(rb"<w:sectPr\b.*?</w:sectPr>", seg, re.DOTALL)
+        if sm is None:
+            continue
+        text = seg.decode("utf-8", errors="replace")
+        if not any(t in text for t in _TOC_TITLE_TEXT):
+            continue
+        pg = re.search(r"<w:pgSz\b[^>]*/>", sm.group(0).decode("utf-8", errors="replace"))
+        if pg is not None:
+            attrs = pg.group(0)
+            wm = re.search(r'w:w="(\d+)"', attrs)
+            hm = re.search(r'w:h="(\d+)"', attrs)
+            if wm and hm:
+                w, h = int(wm.group(1)), int(hm.group(1))
+                landscape = 'w:orient="landscape"' in attrs or w > h
+                if landscape:
+                    continue  # 只复用 portrait 的模板标题页
+        fixed = seg[: sm.start()] + seg[sm.end() :]
+        return (body_end + m.start(), body_end + m.end(), sm.group(0), fixed)
+    return None
+
+
+def _toc_lines_per_page(sect_template: str) -> int:
+    """按目录节版心高度等比换算每页可容纳的目录行数。
+
+    基准：TOC_LINES_PER_PAGE_DEFAULT 行 ↔ 版心高 11187 twips
+    （SAS landscape 正文节：11907 - 上 432 - 下 288，已实测验证）。
+    """
+    pg = re.search(r"<w:pgSz\b[^>]*/>", sect_template)
+    mar = re.search(r"<w:pgMar\b[^>]*/>", sect_template)
+
+    def _attr(tag: str, name: str) -> int | None:
+        m = re.search(name + r'="(\d+)"', tag)
+        return int(m.group(1)) if m else None
+
+    if pg is None or mar is None:
+        return TOC_LINES_PER_PAGE_DEFAULT
+    attrs = pg.group(0)
+    w = _attr(attrs, "w:w")
+    h = _attr(attrs, "w:h")
+    top = _attr(mar.group(0), "w:top") or 1440
+    bottom = _attr(mar.group(0), "w:bottom") or 1440
+    if w is None or h is None:
+        return TOC_LINES_PER_PAGE_DEFAULT
+    landscape = 'w:orient="landscape"' in attrs or w > h
+    eff_h = min(w, h) if landscape else max(w, h)
+    text_h = max(4000, eff_h - top - bottom)
+    return max(15, round(TOC_LINES_PER_PAGE_DEFAULT * text_h / 11187))
+
+
 def inject_toc(
     docx_path: Path,
     config: TocConfig,
@@ -434,10 +499,26 @@ def inject_toc(
     else:
         raise ValueError(f"Unknown position: {config.position}")
 
+    # 6b. 模板目录标题页复用检测：文首存在 portrait 的目录占位页时，
+    # 将目录条目并入该节（标题页不再孤立为空白页，目录自然继承 portrait 版式）
+    reuse_title: tuple[int, int, bytes, bytes] | None = None
+    first_heading_pos = valid_headings[0].p_start
+    if config.position in (Position.DOCUMENT_START, Position.BEFORE_FIRST_HEADING):
+        m_body_start = re.search(rb"<w:body\b[^>]*>", doc_bytes)
+        assert m_body_start is not None
+        reuse_title = _find_leading_toc_title_page(
+            doc_bytes, m_body_start.end(), first_heading_pos
+        )
+    if reuse_title is not None:
+        _p_start, _p_end, _sect_span, _fixed = reuse_title
+        insert_pos = _p_end
+        replace_start = _p_start
+        replace_end = _p_end
+        has_own_title = False
+
     # 7. 分节模板与右制表位绝对计算（取正文首个标题之后首个 sectPr，无则取 insert_pos 之后或最后一个）
     sect_matches = list(re.finditer(rb"<w:sectPr\b.*?</w:sectPr>", doc_bytes, re.DOTALL))
     target_sect = None
-    first_heading_pos = valid_headings[0].p_start if valid_headings else insert_pos
     if sect_matches:
         for s in sect_matches:
             if s.start() >= first_heading_pos:
@@ -451,7 +532,12 @@ def inject_toc(
         if target_sect is None:
             target_sect = sect_matches[-1]
 
-    if target_sect is not None:
+    if reuse_title is not None:
+        # 复用模板标题页：目录节版式 = 原标题页所在节的版式（portrait，含页脚）
+        sect_template = re.sub(
+            r"<w:pgNumType\b[^>]*/>", "", reuse_title[2].decode("utf-8", errors="replace")
+        )
+    elif target_sect is not None:
         raw_sect = target_sect.group(0).decode("utf-8", errors="replace")
         sect_template = re.sub(r"<w:pgNumType\b[^>]*/>", "", raw_sect)
     else:
@@ -473,7 +559,7 @@ def inject_toc(
         if calc_offset == 0:
             # 目录行数 = 标题项数 + (1 if has_own_title and config.title else 0)
             toc_lines = len(valid_headings) + (1 if (has_own_title and config.title) else 0)
-            calc_offset = max(1, math.ceil(toc_lines / TOC_LINES_PER_PAGE_DEFAULT))
+            calc_offset = max(1, math.ceil(toc_lines / _toc_lines_per_page(sect_template)))
         else:
             import logging
             logging.getLogger("wdt.toc").info(
@@ -540,6 +626,9 @@ def inject_toc(
         toc_xml_parts.append(sentinel_p)
 
     toc_replacement_bytes = "".join(toc_xml_parts).encode("utf-8")
+    if reuse_title is not None:
+        # 复用模板标题页：标题段（已剥除 sectPr）置前，目录条目与收尾分节空段落紧随其后
+        toc_replacement_bytes = reuse_title[3] + toc_replacement_bytes
 
     # 11. 正文标题书签/隐藏锚点注入与正文 sectPr 改造规划
     replacements_list: list[tuple[int, int, bytes]] = []
