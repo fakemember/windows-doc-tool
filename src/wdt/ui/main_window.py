@@ -1087,7 +1087,7 @@ class MainWindow(QMainWindow):
         grid.addWidget(self._form_label("待拆分 PDF:"), 0, 0)
         file_row = QHBoxLayout()
         self.edit_split_pdf = DropLineEdit(
-            placeholder="点击右侧浏览或直接拖入 PDF 文件…",
+            placeholder="选择或拖入待拆分的 PDF 文件…",
             allowed_exts=(".pdf",),
             parent=card,
         )
