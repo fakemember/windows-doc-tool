@@ -1073,7 +1073,7 @@ class MainWindow(QMainWindow):
 
         desc = QLabel(
             "针对上百甚至上千页的大型 PDF，自动依据大纲目录将文档智能拆分为合适大小的独立分卷，\n"
-            "并自动为各卷生成卷内目录与可跳转书签。（支持将 PDF 直接拖入本卡片）",
+            "并自动为各卷生成卷内目录与可跳转书签。",
             card,
         )
         desc.setObjectName("hintLabel")
@@ -1087,7 +1087,7 @@ class MainWindow(QMainWindow):
         grid.addWidget(self._form_label("待拆分 PDF:"), 0, 0)
         file_row = QHBoxLayout()
         self.edit_split_pdf = DropLineEdit(
-            placeholder="点击右侧浏览，或直接将 PDF 文件拖入此处…",
+            placeholder="点击右侧浏览或直接拖入 PDF 文件…",
             allowed_exts=(".pdf",),
             parent=card,
         )
@@ -1101,7 +1101,7 @@ class MainWindow(QMainWindow):
         grid.addWidget(self._form_label("保存位置:"), 1, 0)
         out_row = QHBoxLayout()
         self.edit_split_outdir = DropLineEdit(
-            placeholder="留空默认保存在原 PDF 所在目录的 _split 文件夹（支持拖入文件夹）",
+            placeholder="留空默认保存在原 PDF 所在目录的 _split 文件夹",
             parent=card,
         )
         out_row.addWidget(self.edit_split_outdir, 1)
