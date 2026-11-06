@@ -126,6 +126,81 @@ class DropArea(QFrame):
             self.main_win.add_paths(paths)
 
 
+class DropLineEdit(QLineEdit):
+    """支持拖拽单个或多个文件自动填入路径的输入框。"""
+
+    def __init__(self, placeholder: str = "", allowed_exts: tuple[str, ...] | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setPlaceholderText(placeholder)
+        self.setAcceptDrops(True)
+        self.allowed_exts = tuple(ext.lower() for ext in allowed_exts) if allowed_exts else None
+
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasUrls():
+            for u in event.mimeData().urls():
+                local = u.toLocalFile()
+                if local:
+                    p = Path(local)
+                    if self.allowed_exts is None or p.suffix.lower() in self.allowed_exts or p.is_dir():
+                        event.acceptProposedAction()
+                        return
+        super().dragEnterEvent(event)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        if event.mimeData().hasUrls():
+            for u in event.mimeData().urls():
+                local = u.toLocalFile()
+                if local:
+                    p = Path(local)
+                    if self.allowed_exts is None or p.suffix.lower() in self.allowed_exts or p.is_dir():
+                        self.setText(str(p.resolve()))
+                        event.acceptProposedAction()
+                        return
+        super().dropEvent(event)
+
+
+class PdfSplitDropCard(QFrame):
+    """支持直接拖拽 PDF 文件的专属卡片容器。"""
+
+    def __init__(self, main_win: MainWindow, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.main_win = main_win
+        self.setAcceptDrops(True)
+        self.setObjectName("settingsCard")
+
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasUrls():
+            for u in event.mimeData().urls():
+                local = u.toLocalFile()
+                if local and Path(local).suffix.lower() == ".pdf":
+                    event.acceptProposedAction()
+                    self.setStyleSheet(
+                        """
+                        QFrame#settingsCard {
+                            border: 2px dashed #2563EB;
+                            background-color: #EFF6FF;
+                        }
+                        """
+                    )
+                    return
+        super().dragEnterEvent(event)
+
+    def dragLeaveEvent(self, event) -> None:
+        self.setStyleSheet("")
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        self.setStyleSheet("")
+        if event.mimeData().hasUrls():
+            for u in event.mimeData().urls():
+                local = u.toLocalFile()
+                if local and Path(local).suffix.lower() == ".pdf":
+                    self.main_win.edit_split_pdf.setText(str(Path(local).resolve()))
+                    event.acceptProposedAction()
+                    return
+        super().dropEvent(event)
+
+
 class MainWindow(QMainWindow):
     """TFLOW 临床 TFL 报告与文档批处理流水线主界面。"""
 
@@ -987,8 +1062,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(14)
 
-        card = QFrame(tab)
-        card.setObjectName("settingsCard")
+        card = PdfSplitDropCard(self, tab)
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(20, 18, 20, 18)
         card_layout.setSpacing(14)
@@ -999,7 +1073,7 @@ class MainWindow(QMainWindow):
 
         desc = QLabel(
             "针对上百甚至上千页的大型 PDF，自动依据大纲目录将文档智能拆分为合适大小的独立分卷，\n"
-            "并自动为各卷生成卷内目录与可跳转书签。",
+            "并自动为各卷生成卷内目录与可跳转书签。（支持将 PDF 直接拖入本卡片）",
             card,
         )
         desc.setObjectName("hintLabel")
@@ -1009,22 +1083,27 @@ class MainWindow(QMainWindow):
         grid.setHorizontalSpacing(14)
         grid.setVerticalSpacing(12)
 
-        # PDF 文件选择
+        # PDF 文件选择（使用 DropLineEdit）
         grid.addWidget(self._form_label("待拆分 PDF:"), 0, 0)
         file_row = QHBoxLayout()
-        self.edit_split_pdf = QLineEdit(card)
-        self.edit_split_pdf.setPlaceholderText("选择或拖入待拆分的 PDF 文件…")
+        self.edit_split_pdf = DropLineEdit(
+            placeholder="点击右侧浏览，或直接将 PDF 文件拖入此处…",
+            allowed_exts=(".pdf",),
+            parent=card,
+        )
         file_row.addWidget(self.edit_split_pdf, 1)
         btn_browse_pdf = QPushButton("浏览…", card)
         btn_browse_pdf.clicked.connect(self._on_browse_split_pdf)
         file_row.addWidget(btn_browse_pdf)
         grid.addLayout(file_row, 0, 1)
 
-        # 输出目录选择
+        # 输出目录选择（使用 DropLineEdit）
         grid.addWidget(self._form_label("保存位置:"), 1, 0)
         out_row = QHBoxLayout()
-        self.edit_split_outdir = QLineEdit(card)
-        self.edit_split_outdir.setPlaceholderText("留空默认保存在原 PDF 所在目录的 _split 文件夹")
+        self.edit_split_outdir = DropLineEdit(
+            placeholder="留空默认保存在原 PDF 所在目录的 _split 文件夹（支持拖入文件夹）",
+            parent=card,
+        )
         out_row.addWidget(self.edit_split_outdir, 1)
         btn_browse_split_out = QPushButton("浏览…", card)
         btn_browse_split_out.clicked.connect(self._on_browse_split_outdir)
