@@ -84,6 +84,22 @@ def extract_outline_tree(reader: PdfReader) -> list[TocNode]:
     return _traverse(outline, 1)
 
 
+def resolve_outline(reader: PdfReader) -> tuple[list[TocNode], set[int]]:
+    """提取书签大纲；无大纲时从打印版 Table of Content 重建。
+
+    返回 (节点树, 需从分卷中剔除的打印目录页集合)。
+    """
+    tree = extract_outline_tree(reader)
+    if tree:
+        return tree, set()
+    from wdt.core.printed_toc_parser import extract_printed_toc
+
+    nodes, toc_pages = extract_printed_toc(reader)
+    if nodes:
+        return nodes, toc_pages
+    return tree, toc_pages
+
+
 def flatten_nodes(nodes: Sequence[TocNode]) -> list[TocNode]:
     """平铺大纲节点（按遍历顺序）。"""
     res: list[TocNode] = []
@@ -139,11 +155,9 @@ def plan_volume_splits(
         return []
 
     placeholders = detect_placeholder_pages(reader)
-    first_valid_page = 0
-    while first_valid_page in placeholders and first_valid_page < total_pages:
-        first_valid_page += 1
 
-    outline_tree = extract_outline_tree(reader)
+    outline_tree, printed_toc_pages = resolve_outline(reader)
+    placeholders |= printed_toc_pages
     if not outline_tree:
         chunk_size = max_pages_per_volume
         content_pages = [p for p in range(total_pages) if p not in placeholders]
@@ -165,6 +179,10 @@ def plan_volume_splits(
                 )
             )
         return volumes
+
+    first_valid_page = 0
+    while first_valid_page in placeholders and first_valid_page < total_pages:
+        first_valid_page += 1
 
     # 分析各节点前缀
     parsed_items = []
@@ -315,38 +333,123 @@ def _text_to_pdf_hex(text: str) -> str:
     return text.encode("utf-16-be").hex()
 
 
+def _measure_toc_row_baselines(
+    toc_page, items: list[tuple[str, int, int]]
+) -> list[float] | None:
+    """从 Word COM 渲染的可视目录页实测每行的基线 y 坐标。
+
+    按"行尾 点导线+页码"定位条目行（与打印目录同一识别原理），
+    规避标题折行/卷标题折行导致固定几何模型漂移的问题。
+    无法逐条匹配时返回 None（调用方回退固定几何模型）。
+    """
+    try:
+        fragments: list[tuple[float, str]] = []
+
+        def _visitor(text: str, _cm, tm, _font_dict, _font_size) -> None:
+            if text.strip():
+                fragments.append((float(tm[5]), text))
+
+        toc_page.extract_text(visitor_text=_visitor)
+    except Exception:
+        return None
+    if not fragments:
+        return None
+
+    # 按基线 y 聚合为行（2pt 容差）
+    fragments.sort(key=lambda f: (-f[0],))
+    line_ys: list[float] = []
+    line_texts: list[str] = []
+    for y, text in fragments:
+        if line_ys and abs(line_ys[-1] - y) <= 2.0:
+            line_texts[-1] += text
+        else:
+            line_ys.append(y)
+            line_texts.append(text)
+    lines: list[tuple[float, str]] = list(zip(line_ys, line_texts))
+
+    def _trailing_number(text: str, require_leaders: bool) -> int | None:
+        if require_leaders:
+            m = re.search(r"\.{2,}\s*(\d{1,6})\s*$", text)
+        else:
+            # 无点导线的满宽行：页码直接跟在标题后（不能与编号/小数点粘连）
+            m = re.search(r"(?<![\d.])(\d{1,6})\s*$", text)
+        return int(m.group(1)) if m else None
+
+    # 点导线行为主锚点
+    leader_rows: list[tuple[float, int]] = []
+    for y, text in lines:
+        n = _trailing_number(text, require_leaders=True)
+        if n is not None:
+            leader_rows.append((y, n))
+
+    # 无点导线的满宽折行条目（标题占满版心、页码直接尾随）作为兜底候选，
+    # 需排除页眉页脚等非条目行
+    orphan_lines: list[tuple[float, str]] = [
+        (y, text)
+        for y, text in lines
+        if _trailing_number(text, require_leaders=True) is None
+        and "原文档对应页码" not in text
+        and not re.match(r"^\s*目\s*录", text)
+        and not re.match(r"^\s*Volume\s+\d+\s+of", text)
+    ]
+
+    baselines: list[float] = []
+    prev_y = float("inf")
+    cursor = 0
+    for title, rel_p, _lvl in items:
+        hit: tuple[float, int] | None = None
+        for j in range(cursor, len(leader_rows)):
+            y, n = leader_rows[j]
+            if y >= prev_y - 2.0:
+                continue
+            if n == rel_p:
+                hit = leader_rows[j]
+                cursor = j + 1
+                break
+        if hit is None:
+            # 兜底：在已确认锚点之间的无点导线行中，按 标题前缀+页码 精确匹配
+            key = re.sub(r"\s+", "", title)[:10]
+            for y, text in orphan_lines:
+                if y >= prev_y - 2.0:
+                    continue
+                if _trailing_number(text, require_leaders=False) != rel_p:
+                    continue
+                if key not in re.sub(r"\s+", "", text):
+                    continue
+                hit = (y, rel_p)
+                break
+        if hit is None:
+            return None
+        baselines.append(hit[0])
+        prev_y = hit[0]
+    return baselines
+
+
+def _volume_toc_items(vol: SplitVolume) -> list[tuple[str, int, int]]:
+    """计算分卷可视目录的全部条目 (标题, 卷内页码, 层级)，不做任何丢弃。"""
+    items: list[tuple[str, int, int]] = []
+    for node in vol.inner_nodes:
+        rel_p = (node.page_index - vol.page_start) + 1
+        items.append((_clean_node_title(node.title), rel_p, node.level))
+    return items
+
+
 def generate_toc_pdf_page(
     volume: SplitVolume,
     all_volumes: list[SplitVolume],
     page_width: float = 595.276,  # A4 width in pt
     page_height: float = 841.890,  # A4 height in pt
+    items_override: list[tuple[str, int, int]] | None = None,
 ) -> bytes:
     """纯 Python 生成支持合规中文显示的矢量 PDF 独立目录页。
-    
+
+    页面只含目录本体：标题 + 经典点线条目，不附加卷信息/页脚等任何其他内容。
     内置标准 CIDFontType0 + UniGB-UTF16-UCS-2 字体描述符，
     支持在任何标准 PDF 查看器（Acrobat, Edge, Chrome, Preview）中完美渲染中文字符。
     """
-    total_vols = len(all_volumes)
-    vol_title = f"Volume {volume.volume_index} of {total_vols}: {volume.title}"
-    if len(vol_title) > 60:
-        vol_title = vol_title[:57] + "..."
-
-    items_to_draw: list[tuple[str, int, int]] = []
-    seen_prefixes = set()
-    for node in volume.inner_nodes:
-        # 正文页码从 1 起始
-        rel_page = (node.page_index - volume.page_start) + 1
-        clean_name = _clean_node_title(node.title)
-        
-        m = re.search(r"(\d+(?:\.\d+)*)", clean_name)
-        code = m.group(1) if m else clean_name[:15]
-        if len(volume.inner_nodes) > 25:
-            prefix_key = ".".join(code.split(".")[:3])
-            if prefix_key in seen_prefixes and len(items_to_draw) >= 20:
-                continue
-            seen_prefixes.add(prefix_key)
-
-        items_to_draw.append((clean_name, rel_page, node.level))
+    items_to_draw: list[tuple[str, int, int]] = (
+        items_override if items_override is not None else _volume_toc_items(volume)[:25]
+    )
 
     content_lines: list[str] = []
 
@@ -414,23 +517,6 @@ def generate_toc_pdf_page(
 
         y -= line_height
 
-    if len(volume.inner_nodes) > len(items_to_draw[:max_items]):
-        remaining = len(volume.inner_nodes) - len(items_to_draw[:max_items])
-        omitted_text = f"[+ 尚有 {remaining} 个子表未在概览页展开...]"
-        content_lines.append("BT")
-        content_lines.append("/F_CN 8 Tf")
-        content_lines.append("0.5 0.5 0.5 rg")
-        content_lines.append(f"40 {y - 4:.2f} Td")
-        content_lines.append(f"<{_text_to_pdf_hex(omitted_text)}> Tj")
-        content_lines.append("ET")
-
-    footer_text = f"Part {volume.volume_index} | 原文档对应页码 P.{volume.page_start + 1} - P.{volume.page_end + 1}"
-    content_lines.append("BT")
-    content_lines.append("/F_CN 8 Tf")
-    content_lines.append("0.55 0.55 0.55 rg")
-    content_lines.append(f"40 32 Td")
-    content_lines.append(f"<{_text_to_pdf_hex(footer_text)}> Tj")
-    content_lines.append("ET")
     content_lines.append("Q")
 
     stream_content = "\n".join(content_lines).encode("latin-1")
@@ -529,40 +615,33 @@ def split_pdf_by_outline(
     if not volumes:
         return []
 
-    placeholders = detect_placeholder_pages(reader)
+    _, printed_toc_pages = resolve_outline(reader)
+    placeholders = detect_placeholder_pages(reader) | printed_toc_pages
 
-    # 预先批量构建各分卷的高保真 Word COM 中文目录页
-    toc_pdf_bytes_list: list[bytes] = []
+    # 预先批量构建各分卷的高保真 Word COM 中文目录页。
+    # 目录页为纯目录（仅标题+点线条目，无卷信息/页脚等附加内容）；
+    # 条目超过单页容量 (24) 时自动分页，绝不丢弃条目。
+    _TOC_ITEMS_PER_PAGE = 24
+    vol_toc_items: list[list[list[tuple[str, int, int]]]] = []  # 卷 -> 页 -> 条目
+    toc_pdf_bytes_list: list[bytes] = []  # 平铺：与 toc_specs 一一对应
     if with_visual_toc:
         toc_specs = []
         for vol in volumes:
-            items_to_draw = []
-            seen_prefixes = set()
-            for node in vol.inner_nodes:
-                rel_p = (node.page_index - vol.page_start) + 1
-                clean_name = _clean_node_title(node.title)
-                m = re.search(r"(\d+(?:\.\d+)*)", clean_name)
-                code = m.group(1) if m else clean_name[:15]
-                if len(vol.inner_nodes) > 25:
-                    prefix_key = ".".join(code.split(".")[:3])
-                    if prefix_key in seen_prefixes and len(items_to_draw) >= 20:
-                        continue
-                    seen_prefixes.add(prefix_key)
-                items_to_draw.append((clean_name, rel_p, node.level))
-
-            overview_text = f"MULTI-VOLUME COMPILATION: {len(volumes)} VOLUMES TOTAL"
-            v_title = f"Volume {vol.volume_index} of {len(volumes)}: {vol.title}"
-            footer_txt = f"Part {vol.volume_index} | 原文档对应页码 P.{vol.page_start + 1} - P.{vol.page_end + 1}"
-            toc_specs.append({
-                "vol_title": v_title,
-                "overview_text": overview_text,
-                "items": items_to_draw,
-                "footer_text": footer_txt,
-            })
+            items = _volume_toc_items(vol)
+            pages = [items[i : i + _TOC_ITEMS_PER_PAGE] for i in range(0, len(items), _TOC_ITEMS_PER_PAGE)] or [[]]
+            vol_toc_items.append(pages)
+            for page_items in pages:
+                toc_specs.append({
+                    "vol_title": "",
+                    "overview_text": "",
+                    "items": page_items,
+                    "footer_text": "",
+                })
         toc_pdf_bytes_list = create_toc_pages_batch(toc_specs, style=style)
 
     results: list[SplitResult] = []
     digits = len(str(len(volumes)))
+    toc_spec_cursor = 0  # 平铺 toc_pdf_bytes_list / vol_toc_items 的读取游标
 
     for idx, vol in enumerate(volumes):
         writer = PdfWriter()
@@ -574,14 +653,36 @@ def split_pdf_by_outline(
         p_width = float(page_box.width)
         p_height = float(page_box.height)
 
+        vol_toc_pages: list[tuple[bytes, list[tuple[str, int, int]]]] = []
         if with_visual_toc:
-            toc_bytes = toc_pdf_bytes_list[idx] if (idx < len(toc_pdf_bytes_list) and toc_pdf_bytes_list[idx]) else None
-            if not toc_bytes:
-                toc_bytes = generate_toc_pdf_page(vol, volumes, page_width=p_width, page_height=p_height)
+            for page_items in vol_toc_items[idx]:
+                toc_bytes = (
+                    toc_pdf_bytes_list[toc_spec_cursor]
+                    if toc_spec_cursor < len(toc_pdf_bytes_list) and toc_pdf_bytes_list[toc_spec_cursor]
+                    else None
+                )
+                toc_spec_cursor += 1
+                vol_toc_pages.append((toc_bytes, page_items))
 
-            toc_reader = PdfReader(io.BytesIO(toc_bytes))
-            writer.add_page(toc_reader.pages[0])
-            toc_page_offset = 1
+        if with_visual_toc:
+            num_toc_pages = len(vol_toc_pages)
+            for page_no, (toc_bytes, page_items) in enumerate(vol_toc_pages):
+                if toc_bytes:
+                    try:
+                        if len(PdfReader(io.BytesIO(toc_bytes)).pages) > 1:
+                            toc_bytes = b""  # Word 溢出多页：回退内置生成器，保证条目完整
+                    except Exception:
+                        toc_bytes = b""
+                if not toc_bytes:
+                    toc_bytes = generate_toc_pdf_page(
+                        vol, volumes,
+                        page_width=p_width, page_height=p_height,
+                        items_override=page_items or None,
+                    )
+                vol_toc_pages[page_no] = (toc_bytes, page_items)
+                toc_reader = PdfReader(io.BytesIO(toc_bytes))
+                writer.add_page(toc_reader.pages[0])
+            toc_page_offset = num_toc_pages
 
             writer.add_outline_item(
                 title=f"Table of Contents ({vol.title})",
@@ -605,47 +706,61 @@ def split_pdf_by_outline(
                     page_number=page_index_map[node.page_index],
                 )
 
-        # 为第 0 页可视目录页添加真实点击交互超链接 (Link Annotations)
-        if with_visual_toc and toc_page_offset == 1:
-            drawn_items = toc_specs[idx]["items"][:24] if toc_specs else []
-            # Word 渲染起始 y 坐标约为 717.1 pt，逐行递减 27.0 pt；内置 Python fallback 渲染起始为 height - 105，行高 22 pt
-            used_word = bool(toc_pdf_bytes_list and idx < len(toc_pdf_bytes_list) and toc_pdf_bytes_list[idx])
-            start_y = 717.1 if used_word else (p_height - 105.0)
-            line_step = 27.0 if used_word else 22.0
+        # 为各可视目录页添加真实点击交互超链接 (Link Annotations)
+        if with_visual_toc:
+            for page_no, (toc_bytes, page_items) in enumerate(vol_toc_pages):
+                if not page_items:
+                    continue
+                drawn_items = page_items
+                # 优先实测 Word 渲染的条目行基线（规避标题折行导致的固定几何漂移）；
+                # 实测失败时回退固定几何模型（Word 渲染起始 y≈717.1pt、行高 27pt；内置 fallback 为 height-105 / 22pt）
+                toc_pdf_page = PdfReader(io.BytesIO(toc_bytes)).pages[0] if toc_bytes else None
+                measured = None
+                if toc_bytes:
+                    try:
+                        measured = _measure_toc_row_baselines(toc_pdf_page, drawn_items)
+                    except Exception:
+                        measured = None
+                used_word = bool(toc_bytes)
+                start_y = 717.1 if used_word else (p_height - 105.0)
+                line_step = 27.0 if used_word else 22.0
 
-            for item_idx, (it_title, rel_p, lvl) in enumerate(drawn_items):
-                # rel_p 为 1-based 的正文页码，对应的物理页为 target_page_idx = rel_p
-                target_page_idx = rel_p
-                if target_page_idx < len(writer.pages):
-                    target_page_ref = writer.pages[target_page_idx].indirect_reference
-                    center_y = start_y - (item_idx * line_step)
-                    y_bottom = center_y - 7.0
-                    y_top = center_y + 13.0
+                for item_idx, (it_title, rel_p, lvl) in enumerate(drawn_items):
+                    # rel_p 为 1-based 卷内正文页码；物理页 = 目录页数 + rel_p - 1
+                    target_page_idx = rel_p - 1 + toc_page_offset
+                    if 0 <= target_page_idx < len(writer.pages):
+                        target_page_ref = writer.pages[target_page_idx].indirect_reference
+                        if measured is not None:
+                            baseline_y = measured[item_idx]
+                            y_bottom = baseline_y - 4.0
+                            y_top = baseline_y + 16.0
+                        else:
+                            center_y = start_y - (item_idx * line_step)
+                            y_bottom = center_y - 7.0
+                            y_top = center_y + 13.0
 
-                    link_annot = DictionaryObject({
-                        NameObject("/Type"): NameObject("/Annot"),
-                        NameObject("/Subtype"): NameObject("/Link"),
-                        NameObject("/Rect"): ArrayObject([
-                            FloatObject(40.0),
-                            FloatObject(y_bottom),
-                            FloatObject(p_width - 40.0),
-                            FloatObject(y_top),
-                        ]),
-                        NameObject("/Border"): ArrayObject([
-                            NumberObject(0),
-                            NumberObject(0),
-                            NumberObject(0),
-                        ]),
-                        NameObject("/Dest"): ArrayObject([
-                            target_page_ref,
-                            NameObject("/Fit"),
-                        ]),
-                    })
-                    writer.add_annotation(page_number=0, annotation=link_annot)
+                        link_annot = DictionaryObject({
+                            NameObject("/Type"): NameObject("/Annot"),
+                            NameObject("/Subtype"): NameObject("/Link"),
+                            NameObject("/Rect"): ArrayObject([
+                                FloatObject(40.0),
+                                FloatObject(y_bottom),
+                                FloatObject(p_width - 40.0),
+                                FloatObject(y_top),
+                            ]),
+                            NameObject("/Border"): ArrayObject([
+                                NumberObject(0),
+                                NumberObject(0),
+                                NumberObject(0),
+                            ]),
+                            NameObject("/Dest"): ArrayObject([
+                                target_page_ref,
+                                NameObject("/Fit"),
+                            ]),
+                        })
+                        writer.add_annotation(page_number=page_no, annotation=link_annot)
 
-        safe_title = re.sub(r'[\\/*?:"<>|]', "_", vol.title).strip()
-        safe_title = safe_title[:40].strip()
-        out_name = f"{src_pdf.stem}_Part{vol.volume_index:0{digits}d}_{safe_title}.pdf"
+        out_name = f"{src_pdf.stem}_Part{vol.volume_index:0{digits}d}.pdf"
         dst_path = target_dir / out_name
 
         with open(dst_path, "wb") as f:

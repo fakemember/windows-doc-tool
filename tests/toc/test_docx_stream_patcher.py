@@ -503,3 +503,40 @@ def test_reuse_portrait_toc_title_page(tmp_path: Path):
     # portrait 版心更高，每页行数应按几何放大（> 38 行基准）
     headings = ["14.1 首次给药", "14.2 疗效评估"]
     assert all(h in doc_str for h in headings)
+
+
+def test_reuse_toc_title_page_with_separate_sect_paragraph(tmp_path: Path):
+    """SAS 模板布局：目录标题段与分节空段是两个独立段落，同样应触发标题页复用"""
+    portrait_sect = (
+        '<w:sectPr><w:pgSz w:w="11907" w:h="16840" w:code="9"/>'
+        '<w:pgMar w:top="432" w:right="1296" w:bottom="288" w:left="1296" w:header="720" w:footer="720"/></w:sectPr>'
+    )
+    landscape_sect = (
+        '<w:sectPr><w:pgSz w:w="16840" w:h="11907"/>'
+        '<w:pgMar w:top="432" w:right="1296" w:bottom="288" w:left="1296" w:header="720" w:footer="720"/></w:sectPr>'
+    )
+    docx_file = tmp_path / "test_title_page_separate_sect.docx"
+    build_docx(
+        docx_file,
+        [
+            {"text": "Table of Content"},
+            {"text": "", "sect_pr": portrait_sect},
+            {"text": ""},
+            {"text": "14.1 首次给药", "pstyle": "Heading1"},
+            {"text": "14.2 疗效评估", "pstyle": "Heading1"},
+        ],
+        body_sect_pr=landscape_sect,
+    )
+
+    inject_toc(docx_file, TocConfig(page_mode=PageMode.STATIC_CONTINUOUS))
+    doc_str, _, _ = _read_docx_xmls(docx_file)
+    ET.fromstring(doc_str)
+
+    # 标题页与目录合并：标题唯一、不重复注入目录标题、标题与条目间不再有孤立分节空段
+    assert doc_str.count("Table of Content") == 1
+    assert '<w:pStyle w:val="TOC"/>' not in doc_str
+    # 目录节（首个 sectPr）保持 portrait 版式
+    first_sect = re.search(r"<w:sectPr\b.*?</w:sectPr>", doc_str, re.DOTALL).group(0)
+    assert 'w:w="11907"' in first_sect and 'w:h="16840"' in first_sect
+    headings = ["14.1 首次给药", "14.2 疗效评估"]
+    assert all(h in doc_str for h in headings)

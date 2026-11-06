@@ -322,18 +322,37 @@ def _find_leading_toc_title_page(
 ) -> tuple[int, int, bytes, bytes] | None:
     """在文首首个标题之前查找独占一个 portrait 节的目录标题占位页。
 
-    返回 (段落起始, 段落结束, 段落内 sectPr 字节, 去除 sectPr 后的段落字节)；
+    返回 (标题段起始, 占位页结束, sectPr 字节, 去除 sectPr 后的标题段字节)；
+    占位页结束涵盖标题段之后仅含分节符的空段。
     未找到时返回 None。
     """
     region = doc_bytes[body_end:first_heading_pos]
-    for m in re.finditer(rb"<w:p\b[^>]*>.*?</w:p>", region, re.DOTALL):
+    paragraphs = list(re.finditer(rb"<w:p\b[^>]*>.*?</w:p>", region, re.DOTALL))
+    for idx, m in enumerate(paragraphs):
         seg = m.group(0)
-        sm = re.search(rb"<w:sectPr\b.*?</w:sectPr>", seg, re.DOTALL)
-        if sm is None:
-            continue
         text = seg.decode("utf-8", errors="replace")
         if not any(t in text for t in _TOC_TITLE_TEXT):
             continue
+        sm = re.search(rb"<w:sectPr\b.*?</w:sectPr>", seg, re.DOTALL)
+        page_end = m.end()
+        fixed = seg
+        if sm is None:
+            # 分节符不在标题段内：向后查找标题页收尾的纯分节符空段
+            # （SAS 模板布局：标题段 + 独立的分节空段）
+            for m2 in paragraphs[idx + 1 : idx + 4]:
+                seg2 = m2.group(0)
+                inner_texts = re.findall(rb"<w:t\b[^>]*>([^<]*)</w:t>", seg2)
+                if any(t.strip() for t in inner_texts):
+                    break  # 中间出现有文字的段落，不属于标题页
+                sm2 = re.search(rb"<w:sectPr\b.*?</w:sectPr>", seg2, re.DOTALL)
+                if sm2 is not None:
+                    sm = sm2
+                    page_end = m2.end()
+                    break
+            if sm is None:
+                continue
+        else:
+            fixed = seg[: sm.start()] + seg[sm.end() :]
         pg = re.search(r"<w:pgSz\b[^>]*/>", sm.group(0).decode("utf-8", errors="replace"))
         if pg is not None:
             attrs = pg.group(0)
@@ -344,8 +363,7 @@ def _find_leading_toc_title_page(
                 landscape = 'w:orient="landscape"' in attrs or w > h
                 if landscape:
                     continue  # 只复用 portrait 的模板标题页
-        fixed = seg[: sm.start()] + seg[sm.end() :]
-        return (body_end + m.start(), body_end + m.end(), sm.group(0), fixed)
+        return (body_end + m.start(), body_end + page_end, sm.group(0), fixed)
     return None
 
 

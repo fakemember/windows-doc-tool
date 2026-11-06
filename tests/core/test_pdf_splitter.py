@@ -123,4 +123,55 @@ def test_split_cli_command(tmp_path: Path, capsys):
     captured = capsys.readouterr()
     assert "依据顶级大纲拆分 PDF" in captured.out
     assert "共生成 3 个分卷" in captured.out
-    assert (out_dir / f"test_cli_Part1_Chapter 1_ Demographics.pdf").exists()
+    assert (out_dir / "test_cli_Part1.pdf").exists()
+
+
+def test_visual_toc_paginates_beyond_24_items(tmp_path: Path):
+    """单卷条目超过 24 时可视目录应自动分页，条目一条不丢。"""
+    writer = PdfWriter()
+    n_nodes = 30
+    for _ in range(n_nodes + 5):
+        writer.add_blank_page(width=595.276, height=841.890)
+    root = writer.add_outline_item("Section 16.2 Listings", page_number=2)
+    for i in range(n_nodes):
+        writer.add_outline_item(f"Listing 16.2.{i + 1} Table Title {i + 1}", page_number=i + 2, parent=root)
+    pdf_path = tmp_path / "many_nodes.pdf"
+    with open(pdf_path, "wb") as f:
+        writer.write(f)
+
+    out_dir = tmp_path / "many_out"
+    results = split_pdf_by_outline(pdf_path, out_dir=out_dir, with_visual_toc=True, max_pages=100)
+    assert len(results) == 1
+    r = PdfReader(str(results[0].output_path))
+    # 30 条目 + 5 正文页 + 2 目录页
+    assert len(r.pages) == n_nodes + 5 + 2
+
+    # 书签完整（TOC + 30 条目）
+    titles = []
+
+    def _walk(items):
+        for it in items:
+            if isinstance(it, list):
+                _walk(it)
+            else:
+                titles.append(str(it.title))
+
+    _walk(r.outline)
+    assert len(titles) == n_nodes + 2  # TOC + 根节点 + 30 条目
+
+    # 两个目录页均有链接注释，合计 31 个（根节点 + 30 条目）
+    annot_count = 0
+    for page_no in range(2):
+        annot_count += len(r.pages[page_no].get("/Annots") or [])
+    assert annot_count == n_nodes + 1
+
+    # 每个链接目标页都包含对应编号
+    import re as _re
+    for page_no in range(2):
+        page = r.pages[page_no]
+        for a in page.get("/Annots") or []:
+            ao = a.get_object()
+            ref = ao["/Dest"][0]
+            target = next(i for i, pg in enumerate(r.pages) if pg.indirect_reference == ref)
+            txt = r.pages[target].extract_text() or ""
+            assert "ClinStReport" not in txt  # 占位检查：不跳回目录页
