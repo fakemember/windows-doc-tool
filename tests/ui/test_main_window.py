@@ -205,24 +205,34 @@ def test_missing_word_engine_dialog_interception(tmp_path: Path, main_window, mo
     assert main_window.worker is None
 
 
-def test_ui_source_has_toc_direct_pdf(main_window):
-    """原文档已有目录 → 直接转 PDF：convert 模式，不产出 DOCX，目录编排被跳过。"""
+def test_ui_source_has_toc_direct_convert(main_window):
+    """原文档已有目录 → 跳过目录编排，支持转换 DOCX / PDF。"""
     main_window.radio_src_has_toc.setChecked(True)
 
-    opts = main_window.get_pipeline_options()
-    assert opts.mode == "convert"
-    assert opts.make_docx is False
-    assert opts.make_pdf is True
-
-    # 目录编排被禁用
+    # 目录编排被禁用，但输出格式复选框保持可用
     assert main_window.chk_enable_toc.isChecked() is False
     assert main_window.chk_enable_toc.isEnabled() is False
-    assert main_window.chk_docx.isEnabled() is False
+    assert main_window.chk_docx.isEnabled() is True
+    assert main_window.chk_pdf.isEnabled() is True
 
-    # 切回无目录：恢复流水线默认值
+    # 测试仅勾选 DOCX
+    main_window.chk_docx.setChecked(True)
+    main_window.chk_pdf.setChecked(False)
+    opts_docx = main_window.get_pipeline_options()
+    assert opts_docx.mode == "convert"
+    assert opts_docx.make_docx is True
+    assert opts_docx.make_pdf is False
+
+    # 测试仅勾选 PDF
+    main_window.chk_docx.setChecked(False)
+    main_window.chk_pdf.setChecked(True)
+    opts_pdf = main_window.get_pipeline_options()
+    assert opts_pdf.mode == "convert"
+    assert opts_pdf.make_docx is False
+    assert opts_pdf.make_pdf is True
+
+    # 切回全新编排：恢复流水线默认值
     main_window.radio_src_no_toc.setChecked(True)
     opts2 = main_window.get_pipeline_options()
     assert opts2.mode == "run"
-    assert opts2.make_docx is True
-    assert opts2.make_pdf is True
     assert main_window.chk_enable_toc.isChecked() is True

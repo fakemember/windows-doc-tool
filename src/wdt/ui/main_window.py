@@ -711,17 +711,13 @@ class MainWindow(QMainWindow):
         self._update_engine_pill()
 
     def _on_source_toc_changed(self) -> None:
-        """源文档目录情况切换：已有目录 → 跳过目录编排，直接转 PDF。"""
+        """源文档目录情况切换：已有目录 → 跳过目录编排，仅做格式转换。"""
         has_toc = self.radio_src_has_toc.isChecked()
         self.chk_enable_toc.setEnabled(not has_toc)
-        self.chk_docx.setEnabled(not has_toc)
         if has_toc:
             self.chk_enable_toc.setChecked(False)
-            self.chk_docx.setChecked(False)
-            self.chk_pdf.setChecked(True)
         else:
             self.chk_enable_toc.setChecked(True)
-            self.chk_docx.setChecked(True)
 
     def _on_toc_toggle(self, checked: bool) -> None:
         self.toc_body_widget.setVisible(checked)
@@ -880,10 +876,12 @@ class MainWindow(QMainWindow):
 
         # 模式自适应判定：兼容单元测试以及纯交付目标驱动
         if self.radio_src_has_toc.isChecked():
-            # 原文档已有目录：跳过目录编排，Word COM 直接转 PDF
+            # 原文档已有目录：跳过目录编排，仅做格式转换 (convert 模式)
             mode = "convert"
-            make_docx = False
-            make_pdf = True
+            make_docx = self.chk_docx.isChecked()
+            make_pdf = self.chk_pdf.isChecked()
+            if not make_docx and not make_pdf:
+                raise ValueError("请至少勾选一种交付物（DOCX 或 PDF）")
         else:
             if self.radio_mode_conv.isChecked() or (not self.chk_enable_toc.isChecked()):
                 mode = "convert"
